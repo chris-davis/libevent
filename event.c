@@ -88,6 +88,7 @@ extern const struct eventop devpollops;
 #endif
 #ifdef WIN32
 extern const struct eventop win32ops;
+extern const struct eventop iocpops;
 #endif
 
 /* In order of preference */
@@ -112,6 +113,7 @@ static const struct eventop *eventops[] = {
 #endif
 #ifdef WIN32
 	&win32ops,
+	&iocpops,
 #endif
 	NULL
 };
