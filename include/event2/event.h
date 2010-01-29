@@ -176,7 +176,10 @@ enum event_method_feature {
     EV_FEATURE_O1 = 0x02,
     /* Require an event method that allows file descriptors as well as
      * sockets. */
-    EV_FEATURE_FDS = 0x04
+    EV_FEATURE_FDS = 0x04,
+    /* Require an event method that allows monitoring of win32 handles
+     * such as those for event objects and threads. */
+    EV_FEATURE_HANDLES = 0x08,
 };
 
 enum event_base_config_flag {
