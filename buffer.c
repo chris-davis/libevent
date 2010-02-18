@@ -1691,9 +1691,10 @@ evbuffer_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch)
 			DWORD bytesRead;
 			DWORD flags=0;
 			if (WSARecv(fd, vecs, nvecs, &bytesRead, &flags, NULL, NULL)) {
+				DWORD err = WSAGetLastError();
 				/* The read failed. It might be a close,
 				 * or it might be an error. */
-				if (WSAGetLastError() == WSAECONNABORTED)
+				if (err == WSAECONNABORTED || err == WSAECONNRESET)
 					n = 0;
 				else
 					n = -1;
