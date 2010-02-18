@@ -523,7 +523,7 @@ http_bad_request_test(void)
 
 	shutdown(fd, SHUT_WR);
 	timerclear(&tv);
-	tv.tv_usec = 10000;
+	tv.tv_usec = 100000;
 	event_once(-1, EV_TIMEOUT, http_badreq_successcb, bev, &tv);
 
 	event_dispatch();
@@ -555,7 +555,7 @@ http_bad_request_test(void)
 	bufferevent_write(bev, http_request, strlen(http_request));
 
 	timerclear(&tv);
-	tv.tv_usec = 10000;
+	tv.tv_usec = 100000;
 	event_once(-1, EV_TIMEOUT, http_badreq_successcb, bev, &tv);
 
 	event_dispatch();
