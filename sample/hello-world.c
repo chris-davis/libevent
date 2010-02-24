@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <signal.h>
 
+#ifdef WIN32
+#include <winsock2.h>
+#endif
+
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include <event2/listener.h>
