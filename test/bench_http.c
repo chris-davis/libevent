@@ -85,9 +85,17 @@ http_ref_cb(struct evhttp_request *req, void *arg)
 int
 main (int argc, char **argv)
 {
-	struct event_base *base = event_base_new();
-	struct evhttp *http = evhttp_new(base);
+	struct event_base *base;
+	struct evhttp *http;
 	int c;
+
+#ifdef WIN32
+        WSADATA WSAData;
+        WSAStartup(0x101, &WSAData);
+#endif
+
+	base = event_base_new();
+	http = evhttp_new(base);
 
 	unsigned short port = 8080;
 	while ((c = getopt(argc, argv, "p:l:")) != -1) {
