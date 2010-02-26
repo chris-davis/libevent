@@ -576,6 +576,40 @@ iocp_fetch_one(struct iocp_loop_ctx *ctx, DWORD ms, struct iocp_event **iev,
 	return 1;
 }
 
+struct iocp_poll_result {
+	struct iocp_event *iev;
+	short what;
+};
+
+static ssize_t
+iocp_fetch_many(struct iocp_loop_ctx *ctx, DWORD ms,
+                int *expired, struct iocp_poll_result **res,
+                size_t resno)
+{
+	size_t i;
+	int timedout = 0;
+	int rv;
+
+	EVUTIL_ASSERT(resno <= SSIZE_T_MAX);
+
+	*expired = 0;
+
+	for (i = 0; i < resno; ++i) {
+		rv = iocp_fetch_one(ctx, timedout? ms : 0, &res[i].iev, &res[i].what);
+		if (rv < 0)
+			return -1;
+		else if (rv == 0) {
+			if (timedout)
+				break;
+			timedout = 1;
+		}
+	}
+
+	*expired = timedout;
+
+	return (ssize_t)i;
+}
+
 static void
 iocp_active(struct event_base *base, struct iocp_event *iev, short what)
 {
@@ -611,21 +645,27 @@ static int
 iocp_flush(struct event_base *base)
 {
 	struct iocp_loop_ctx *ctx = base->evbase;
-	int rv;
-	struct iocp_event *iev;
-	short what;
+	struct iocp_poll_result polls[128];
+	ssize_t count, i;
+	int expired;
 
 	IOCP_RELEASE_LOCK(ctx);
 
-	while ((rv = iocp_fetch_one(ctx, 0, &iev, &what)) == 1) {
+	while ((count = iocp_fetch_many(ctx, 0, &expired, polls, 128)) > 1) {
 		IOCP_ACQUIRE_LOCK(ctx);
-		iocp_active(base, iev, what);
+		for (i = 0; i < count; ++i)
+			iocp_active(base, polls[i].iev, polls[i].what);
 		IOCP_RELEASE_LOCK(ctx);
+		if (expired)
+			break;
 	}
 
 	IOCP_ACQUIRE_LOCK(ctx);
 
-	return rv;
+	if (count < 0)
+		return -1;
+
+	return 0;
 }
 
 /* Libevent slots */
@@ -658,10 +698,11 @@ static int
 iocp_loop_dispatch(struct event_base *base, struct timeval *tv)
 {
 	struct iocp_loop_ctx *ctx = base->evbase;
-	struct iocp_event *iev;
 	int rv = 0;
-	short what;
 	DWORD ms = INFINITE;
+	struct iocp_poll_result polls[128];
+	ssize_t count, i;
+	int expired;
 
 	IOCP_ACQUIRE_LOCK(ctx);
 
@@ -680,21 +721,24 @@ iocp_loop_dispatch(struct event_base *base, struct timeval *tv)
 		goto out;
 	}
 
+	// XXX detect overflow in this calculation
 	if (tv)
 		ms = tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000;
 
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 	IOCP_RELEASE_LOCK(ctx);
 
-	rv = iocp_fetch_one(ctx, ms, &iev, &what);
+	count = iocp_fetch_many(ctx, ms, &expired, polls, 128);
 
 	IOCP_ACQUIRE_LOCK(ctx);
 	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
-	if (rv == 1) {
-		iocp_active(base, iev, what);
+	if (count > 0) {
+		for (i = 0; i < count; ++i)
+			iocp_active(base, polls[i].iev, polls[i].what);
 		rv = 0;
-	}
+	} else if (count < 0)
+		rv = -1;
 
 	if (!ctx->nactivated || base->sig.evsig_caught)
 		evsig_process(base);
