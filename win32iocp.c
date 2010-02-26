@@ -455,19 +455,17 @@ poll_thread_pool_destroy(struct iocp_loop_ctx *ctx)
 	}
 }
 
-static int
+static void
 overlapped_queue_push(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 {
 	EVUTIL_ASSERT(iev->type == IOCP_SOCK_OVERLAPPED);
 
 	if (iev->flags & IOCP_QUEUED)
-		return 0;
+		return;
 
 	iocp_event_incref(iev);
 	iev->flags |= IOCP_QUEUED;
 	TAILQ_INSERT_TAIL(&ctx->overlapped_queue, iev, next);
-
-	return 0;
 }
 
 /* If iev is not pending, remove from queue, otherwise set cancel flag. */
