@@ -1,5 +1,5 @@
 /*
- * Copyright 2007-2009 Niels Provos and Nick Mathewson
+ * Copyright 2010 Christopher Davis <chrisd@torproject.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -23,6 +23,12 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+/*
+ * This backend is based upon a design by Stephen Liu, though it
+ * has been rewritten to support Libevent 2.0.
+ */
+
 #include "event-config.h"
 
 #include <stdio.h>
