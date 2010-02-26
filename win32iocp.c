@@ -214,7 +214,7 @@ poll_thread_destroy(struct poll_thread *poll_thr)
 }
 
 static struct poll_thread *
-poll_thread_new(struct iocp_loop_ctx *ctx, HANDLE iocp)
+poll_thread_new(struct iocp_loop_ctx *ctx)
 {
 	size_t i;
 	struct poll_thread *ret;
@@ -419,7 +419,7 @@ poll_thread_pool_add_event(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 	}
 
 	/* All workers are full, so add a new worker. */
-	new_worker = poll_thread_new(ctx, ctx->iocp);
+	new_worker = poll_thread_new(ctx);
 	if (!new_worker)
 		return -1;
 	if (poll_thread_start(new_worker) < 0 ||
