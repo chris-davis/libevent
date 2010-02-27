@@ -583,14 +583,14 @@ struct iocp_poll_result {
 
 static ssize_t
 iocp_fetch_many(struct iocp_loop_ctx *ctx, DWORD ms,
-                int *expired, struct iocp_poll_result **res,
+                int *expired, struct iocp_poll_result *res,
                 size_t resno)
 {
 	size_t i;
 	int timedout = 0;
 	int rv;
 
-	EVUTIL_ASSERT(resno <= SSIZE_T_MAX);
+	//EVUTIL_ASSERT(resno <= SSIZE_T_MAX);
 
 	*expired = 0;
 
