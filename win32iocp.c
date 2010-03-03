@@ -29,6 +29,36 @@
  * has been rewritten to support Libevent 2.0.
  */
 
+/*
+
+IOCP backend
+
+The Windows select backend has limitations for performance and
+scalability. It'd be nice to have a true O(1) method for polling
+sockets on Windows like epoll or kqueue, so the kernel is not
+tasked with scanning potentially large vectors of sockets on each
+dispatch. While Windows doesn't have a neat interface like epoll or
+kqueue, we can get by using Windows' overlapped I/O (and in certain
+cases event select) to reduce the overhead of finding an active
+socket among many monitored sockets. This design originated from
+Stephen Liu's backend for Libevent 1.4.x. We've adapted his aproach
+for Libevent 2 to remove the EV_CONNECT flag and avoid limiting the
+number of sockets monitored with WSAEventSelect/WaitForMultipleObjects.
+
+The backend uses two different means of polling sockets: poll threads
+and overlapped read and write. UDP sockets, listeners and unconnected
+TCP sockets are added to poll threads, which use WSAEventSelect and
+WaitForMultipleObjects for polling. Connected TCP sockets are polled
+using overlapped read/write with zero sizes (no data is read or
+written, we only want to know when there's active I/O).
+
+A Windows' I/O completion port is used to queue completion packets
+resulting from overlapped I/O operations, as well as the event
+notifications discovered in poll threads. The backend's dispatch slot
+collects completion packets from the IOCP and dispatches them.
+
+*/
+
 #include "event-config.h"
 
 #include <stdio.h>
@@ -56,11 +86,16 @@ struct iocp_loop_ctx;
 struct iocp_event;
 struct poll_thread;
 
+/** Wrap an OVERLAPPED so we can safely use EVUTIL_UPCAST to find
+    the associated iocp event and from there the event type
+    (read or write).
+*/
 struct iocp_overlapped {
 	OVERLAPPED ol;
 	struct iocp_event *ev;
 };
 
+/** The type of the socket. */ 
 enum iocp_event_type {
 	IOCP_SOCK_UDP,
 	IOCP_SOCK_LISTENER,
@@ -68,6 +103,7 @@ enum iocp_event_type {
 	IOCP_SOCK_OVERLAPPED,
 };
 
+/** Flags for an IOCP event. */
 enum iocp_event_flags {
 	IOCP_QUEUED = 1<<0,
 	IOCP_POLL_READ = 1<<1,
@@ -77,38 +113,96 @@ enum iocp_event_flags {
 	IOCP_CANCEL = 1<<5,
 };
 
+/** The event tracked by the IOCP backend.  */
 struct iocp_event {
+	/** Links for the overlapped queue. */
 	TAILQ_ENTRY(iocp_event) next;
+
+	/** The type of the socket. */
 	ev_uint8_t type;
+
+	/** Flags. */
 	ev_uint8_t flags;
+
+	/** Socket descriptor. */
 	evutil_socket_t sock;
+
+	/** Handle of the event object for use with WSAEventSelect. */
 	HANDLE poll_event;
+
+	/** Pointer to the poll thread this iocp event belongs to.
+	    We store this in the event object so we don't have to
+	    search through the thread pool to find it when we want
+	    to remove the event from the poll thread */
 	struct poll_thread *poll_thr;
+
+	/** Overlapped object associated with read events. */
 	struct iocp_overlapped ord;
+
+	/** Overlapped object associated with write events. */
 	struct iocp_overlapped owr;
+
+	/** Reference count. */
 	int refcnt;
 };
 
+/** A thread that polls sockets that can't be polled through overlapped
+    operations. This includes listener sockets, unconnected TCP sockets
+    and UDP sockets. The events to poll for are set with 
+    iocp_event_update_event_selection(), and the associated event objects
+    are monitored in the poll thread. Event notifications are queued in
+    the IOCP. A single thread can only handle MAXIMUM_WAIT_OBJECTS - 1
+    (one object is saved for shutdown notification) worth of sockets at
+    a time, so we use multiple poll threads to monitor greater numbers.
+*/
 struct poll_thread {
+	/** Thread pool links. */
 	TAILQ_ENTRY(poll_thread) next;
+
+	/** Handle of the thread. */
 	HANDLE handle;
+
+	/** The IOCP backend context. */
 	struct iocp_loop_ctx *ctx;
+
+	/** The number of free slots in this thread. */
 	size_t nfree;
+
+	/** Windows event objects to wait on. */
 	HANDLE waitlist[MAXIMUM_WAIT_OBJECTS];
+
+	/** IOCP backend events being monitored. */
 	struct iocp_event *evlist[MAXIMUM_WAIT_OBJECTS];
 };
 
+/** The context for the IOCP backend */
 struct iocp_loop_ctx {
+	/** Handle of the IOCP. */
 	HANDLE iocp;
+	
+	/** Poll thread pool. */
 	TAILQ_HEAD(poll_thread_list, poll_thread) notify_pool;
+
+	/** Queue of events that have pending overlapped operations */
 	TAILQ_HEAD(iocp_event_list, iocp_event) overlapped_queue;
+
+	/** Number of events activated in a call to iocp_loop_dispatch() */
 	size_t nactivated;
+
+	/** A lock for preventing races when manipulating iocp events (adding
+	    and removing references, etc). This is separate from the base lock
+	    to allow things to work when Libevent is compiled without thread
+	    support. */
 	CRITICAL_SECTION lock;
 };
 
 #define IOCP_ACQUIRE_LOCK(ctx) EnterCriticalSection(&(ctx)->lock)
 #define IOCP_RELEASE_LOCK(ctx) LeaveCriticalSection(&(ctx)->lock)
 
+/** Find the type of a socket.
+
+    @param sock The socket
+*/
 static int
 get_sock_type(evutil_socket_t sock)
 {
@@ -149,6 +243,11 @@ get_sock_type(evutil_socket_t sock)
 	return IOCP_SOCK_OVERLAPPED;
 }
 
+/** Allocate a new IOCP event structure.
+
+    @param ctx The IOCP backend context.
+    @param sock The socket to monitor.
+*/
 static struct iocp_event *
 iocp_event_new(struct iocp_loop_ctx *ctx, evutil_socket_t sock)
 {
@@ -182,12 +281,20 @@ iocp_event_new(struct iocp_loop_ctx *ctx, evutil_socket_t sock)
 	return iev;
 }
 
+/** Add a reference to an IOCP event object.
+
+    @param iev The IOCP event object.
+*/
 static void
 iocp_event_incref(struct iocp_event *iev)
 {
 	iev->refcnt++;
 }
 
+/** Remove a reference to an IOCP event object.
+
+    @param iev The IOCP event object.
+*/
 static void
 iocp_event_decref(struct iocp_event *iev)
 {
@@ -199,6 +306,12 @@ iocp_event_decref(struct iocp_event *iev)
 	}
 }
 
+/** Destroy a poll thread.
+
+    The thread should be stopped first!
+
+    @param poll_thr The poll thread object.
+*/
 static void
 poll_thread_destroy(struct poll_thread *poll_thr)
 {
@@ -213,6 +326,10 @@ poll_thread_destroy(struct poll_thread *poll_thr)
 	mm_free(poll_thr);
 }
 
+/** Allocate a new poll thread.
+
+    @param ctx The IOCP backend context.
+*/
 static struct poll_thread *
 poll_thread_new(struct iocp_loop_ctx *ctx)
 {
@@ -241,6 +358,14 @@ poll_thread_new(struct iocp_loop_ctx *ctx)
 	return ret;
 }
 
+/** Post an event notification to the IOCP.
+
+    This is a helper for the thread loop. The IOCP context
+    should be locked.
+
+    @param poll_thr The poll thread.
+    @param i The index of the event.
+*/
 static void
 poll_thread_post(struct poll_thread *poll_thr, DWORD i)
 {
@@ -267,6 +392,10 @@ poll_thread_post(struct poll_thread *poll_thr, DWORD i)
 	PostQueuedCompletionStatus(poll_thr->ctx->iocp, 0, IOCP_KEY_EVENT, ol);
 }
 
+/** The main poll thread loop.
+
+    @param _poll_thr The poll thread.
+*/
 static void
 poll_thread_loop(void *_poll_thr)
 {
@@ -298,6 +427,12 @@ poll_thread_loop(void *_poll_thr)
 	}
 }
 
+/** Start a poll thread.
+
+    The thread should not be already started!   
+ 
+    @param poll_thr The poll thread.
+*/
 static int
 poll_thread_start(struct poll_thread *poll_thr)
 {
@@ -305,6 +440,7 @@ poll_thread_start(struct poll_thread *poll_thr)
 
 	EVUTIL_ASSERT(poll_thr->handle == NULL);
 
+	// XXX this should be _beginthreadex
 	th = _beginthread(poll_thread_loop, 0, poll_thr);
 	if (th == (ev_uintptr_t)-1)
 		return -1;
@@ -314,6 +450,12 @@ poll_thread_start(struct poll_thread *poll_thr)
 	return 0;
 }
 
+/** Stop a poll thread.
+
+    The thread should already be started!   
+ 
+    @param poll_thr The poll thread.
+*/
 static void
 poll_thread_stop(struct poll_thread *poll_thr)
 {
@@ -329,6 +471,12 @@ poll_thread_stop(struct poll_thread *poll_thr)
 	poll_thr->handle = NULL;
 }
 
+/** Add an event to the poll thread.
+
+    @param poll_thr The poll thread.
+    @param iev The IOCP event.
+    @return 1 if succesfully added, 0 if already full.
+*/
 static int
 poll_thread_add_event(struct poll_thread *poll_thr, struct iocp_event *iev)
 {
@@ -353,6 +501,12 @@ poll_thread_add_event(struct poll_thread *poll_thr, struct iocp_event *iev)
 	return 0;
 }
 
+/** Remove an event to the poll thread.
+
+    @param poll_thr The poll thread.
+    @param iev The IOCP event.
+    @return 1 if succesfully removed, 0 not found.
+*/
 static int
 poll_thread_del_event(struct poll_thread *poll_thr, struct iocp_event *iev)
 {
@@ -375,6 +529,15 @@ poll_thread_del_event(struct poll_thread *poll_thr, struct iocp_event *iev)
 	return 0;
 }
 
+/** Set the events a poll thread should monitor.
+ 
+    This translates the socket type and flags into flags
+    for WSAEventSelect(). Call this each time the user changes
+    the events they want to poll for.
+
+    @param iev The IOCP event.
+    @return 0 on success, -1 on failure.
+*/
 static int
 iocp_event_update_event_selection(struct iocp_event *iev)
 {
@@ -402,12 +565,22 @@ iocp_event_update_event_selection(struct iocp_event *iev)
 		abort();
 	}
 
+	/* XXX It seems we can use WSAEventSelect() when a poll thread
+	   is waiting on the event object. */
 	if (WSAEventSelect(iev->sock, iev->poll_event, nev) == SOCKET_ERROR)
 		return -1;
 
 	return 0;
 }
 
+/** Add an event to the poll thread pool.
+
+    If all threads are full, add a new thread automatically.
+
+    @param ctx The IOCP backend context.
+    @param iev The IOCP event.
+    @return 0 on success, -1 on failure.
+*/
 static int
 poll_thread_pool_add_event(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 {
@@ -428,11 +601,19 @@ poll_thread_pool_add_event(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 		return -1;
 	}
 
+	/* Add new threads to the front of the list so we can
+	   fill them up without having to iterate to the back */
 	TAILQ_INSERT_HEAD(&ctx->notify_pool, new_worker, next);
 
 	return 0;
 }
 
+/** Remove an event from the poll event pool.
+    
+    @param ctx The IOCP backend context.
+    @param iev The IOCP event.
+    @return 0 on success, -1 on failure.
+*/
 static int
 poll_thread_pool_del_event(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 {
@@ -443,6 +624,10 @@ poll_thread_pool_del_event(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 	return 0;
 }
 
+/** Stop and destroy all threads in the poll thread pool.
+
+    @param ctx The IOCP backend context.
+*/
 static void
 poll_thread_pool_destroy(struct iocp_loop_ctx *ctx)
 {
@@ -455,6 +640,13 @@ poll_thread_pool_destroy(struct iocp_loop_ctx *ctx)
 	}
 }
 
+/** Queue launching of overlapped operations to poll for events.
+
+    This works on connected TCP sockets only.
+
+    @param ctx The IOCP backend context.
+    @param iev The IOCP event to poll.
+*/
 static void
 overlapped_queue_push(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 {
@@ -468,7 +660,13 @@ overlapped_queue_push(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 	TAILQ_INSERT_TAIL(&ctx->overlapped_queue, iev, next);
 }
 
-/* If iev is not pending, remove from queue, otherwise set cancel flag. */
+/** Cancel pending overlapped operations for an event.
+
+    If iev is not pending, remove from queue, otherwise set cancel flag.
+
+    @param ctx The IOCP backend context.
+    @param iev The IOCP event. 
+*/
 static void
 overlapped_queue_cancel(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 {
@@ -485,6 +683,11 @@ overlapped_queue_cancel(struct iocp_loop_ctx *ctx, struct iocp_event *iev)
 	}
 }
 
+/** Launch queued overlapped operations.
+
+    @param ctx The IOCP backend context.
+    @return 0 on success, -1 on failure.
+*/
 static int
 overlapped_queue_run_all(struct iocp_loop_ctx *ctx)
 {
@@ -538,7 +741,20 @@ overlapped_queue_run_all(struct iocp_loop_ctx *ctx)
 	return 0;
 }
 
-/* return: -1 error, 0 timeout, 1 dispatched or aborted */
+/** Attempt to fetch a single event from the IOCP.
+
+    The base lock or IOCP context lock needn't be held.	A reference
+    to the event is still held. Use iocp_active() to activate the
+    event and remove the reference.
+
+    If an overlapped operation was cancelled, what is set to 0.
+
+    @param ctx The IOCP backend context.
+    @param ms The maximum amount of time to wait for an event.
+    @param iev The fetched event.
+    @param what The event type, EV_READ, EV_WRITE or 0.
+    @return -1 error, 0 timeout, 1 dispatched or aborted.
+*/
 static int
 iocp_fetch_one(struct iocp_loop_ctx *ctx, DWORD ms, struct iocp_event **iev,
 	       short *what)
@@ -576,6 +792,17 @@ iocp_fetch_one(struct iocp_loop_ctx *ctx, DWORD ms, struct iocp_event **iev,
 	return 1;
 }
 
+/** Activate an event and decrement its reference count.
+
+    This tells Libevent to run callbacks if the operation wasn't cancelled
+    (what is not zero). Unconnected sockets are also checked to see if
+    they are now connected and ready to be polled using overlapped
+    operations.
+ 
+    @param base The event base.
+    @param iev The IOCP event.
+    @param what The type of event.
+*/
 static void
 iocp_active(struct event_base *base, struct iocp_event *iev, short what)
 {
@@ -589,6 +816,9 @@ iocp_active(struct event_base *base, struct iocp_event *iev, short what)
 			iev->flags &= ~IOCP_LAUNCHED_READ;
 		else {
 			iev->flags &= ~IOCP_LAUNCHED_WRITE;
+			/* Only remove the socket from the poll thread if the
+			   connection succeeded. The user might try to connect
+			   again if a failure occurred. */
 			if (iev->type == IOCP_SOCK_UNCONNECTED &&
 			    evutil_socket_finished_connecting(iev->sock) == 1) {
 				poll_thread_pool_del_event(ctx, iev);
@@ -606,7 +836,11 @@ iocp_active(struct event_base *base, struct iocp_event *iev, short what)
 	iocp_event_decref(iev);
 }
 
-/* Activate any queued completion packets. */
+/** Activate any queued completion packets.
+
+    @param base The event base.
+    @return 0 on success, -1 on failure.
+*/
 static int
 iocp_flush(struct event_base *base)
 {
@@ -630,6 +864,11 @@ iocp_flush(struct event_base *base)
 
 /* Libevent slots */
 
+/** Init IOCP backend context
+
+    @param base The event base.
+    @return IOCP context.
+*/
 static void *
 iocp_loop_init(struct event_base *base)
 {
@@ -654,6 +893,12 @@ iocp_loop_init(struct event_base *base)
 	return ctx;
 }
 
+/** Run overlapped operations and activate completion packets.
+
+    @param tv Wait time.
+    @param base The event base.
+    @return 0 on success, -1 on failure.
+*/
 static int
 iocp_loop_dispatch(struct event_base *base, struct timeval *tv)
 {
@@ -705,6 +950,16 @@ out:
 	return rv;
 }
 
+/** Start monitoring a socket for I/O event(s)
+
+    @param base The event base.
+    @param fd The socket.
+    @param old Old events.
+    @param events New events.
+    @param _iev IOCP event.
+    @return 0 on success, -1 on failure.
+*/
+// XXX may be able to use changelist stuff here instead 
 static int
 iocp_loop_add(struct event_base *base, evutil_socket_t fd, short old,
 	      short events, void *_iev)
@@ -748,6 +1003,16 @@ iocp_loop_add(struct event_base *base, evutil_socket_t fd, short old,
 	return 0;
 }
 
+/** Stop monitoring event(s)
+
+    @param base The event base.
+    @param fd The socket.
+    @param old Old events.
+    @param events New events.
+    @param _iev IOCP event.
+    @return 0 on success, -1 on failure.
+*/
+// XXX may be able to use changelist stuff here instead 
 static int
 iocp_loop_del(struct event_base *base, evutil_socket_t fd, short old,
 	      short events, void *_iev)
@@ -787,6 +1052,10 @@ iocp_loop_del(struct event_base *base, evutil_socket_t fd, short old,
 	return 0;
 }
 
+/** Destroy IOCP backend context
+
+    @param base The event base.
+*/
 static void
 iocp_loop_dealloc(struct event_base *base)
 {
