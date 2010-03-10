@@ -396,7 +396,7 @@ poll_thread_post(struct poll_thread *poll_thr, DWORD i)
 
     @param _poll_thr The poll thread.
 */
-static void
+static unsigned __stdcall
 poll_thread_loop(void *_poll_thr)
 {
 	DWORD rv;
@@ -411,7 +411,7 @@ poll_thread_loop(void *_poll_thr)
 
 		if (rv == WAIT_FAILED) {
 			// XXX
-			return;
+			return 0;
 		}
 
 		rv -= WAIT_OBJECT_0;
@@ -419,12 +419,14 @@ poll_thread_loop(void *_poll_thr)
 
 		/* We have been asked to quit. */
 		if (rv == 0)
-			return;	
+			return 0;
 
 		IOCP_ACQUIRE_LOCK(poll_thr->ctx);
 		poll_thread_post(poll_thr, rv);
 		IOCP_RELEASE_LOCK(poll_thr->ctx);
 	}
+
+	return 0;
 }
 
 /** Start a poll thread.
@@ -436,16 +438,16 @@ poll_thread_loop(void *_poll_thr)
 static int
 poll_thread_start(struct poll_thread *poll_thr)
 {
-	ev_uintptr_t th;
+	HANDLE th;
 
 	EVUTIL_ASSERT(poll_thr->handle == NULL);
 
-	// XXX this should be _beginthreadex
-	th = _beginthread(poll_thread_loop, 0, poll_thr);
-	if (th == (ev_uintptr_t)-1)
+	th = (HANDLE)_beginthreadex(NULL, 0,
+			poll_thread_loop, poll_thr, 0, NULL);
+	if (th == 0)
 		return -1;
 
-	poll_thr->handle = (HANDLE)th;
+	poll_thr->handle = th;
 
 	return 0;
 }
@@ -463,10 +465,7 @@ poll_thread_stop(struct poll_thread *poll_thr)
 
 	SetEvent(poll_thr->waitlist[0]);
 	WaitForSingleObject(poll_thr->handle, INFINITE);
-	/* XXX GDB gives me an exception from CloseHandle() below.
-	 * Apparently, the handle is cleaned up automatically when the
-	 * thread returns */
-	/*CloseHandle(poll_thr->handle);*/
+	CloseHandle(poll_thr->handle);
 	
 	poll_thr->handle = NULL;
 }
