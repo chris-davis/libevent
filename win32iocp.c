@@ -884,7 +884,7 @@ iocp_loop_init(struct event_base *base)
 
 	TAILQ_INIT(&ctx->notify_pool);
 	TAILQ_INIT(&ctx->overlapped_queue);
-	InitializeCriticalSection(&ctx->lock);
+	InitializeCriticalSectionAndSpinCount(&ctx->lock, 2000);
 	ctx->iocp = iocp;
 
 	evsig_init(base);
