@@ -189,15 +189,9 @@ struct iocp_loop_ctx {
 	/** Number of events activated in a call to iocp_loop_dispatch() */
 	size_t nactivated;
 
-	/** A lock for preventing races when manipulating iocp events (adding
-	    and removing references, etc). This is separate from the base lock
-	    to allow things to work when Libevent is compiled without thread
-	    support. */
-	CRITICAL_SECTION lock;
+	/** The event base; poll threads need access to the base lock. */
+	struct event_base *base;
 };
-
-#define IOCP_ACQUIRE_LOCK(ctx) EnterCriticalSection(&(ctx)->lock)
-#define IOCP_RELEASE_LOCK(ctx) LeaveCriticalSection(&(ctx)->lock)
 
 /** Find the type of a socket.
 
@@ -401,6 +395,7 @@ poll_thread_loop(void *_poll_thr)
 {
 	DWORD rv;
 	struct poll_thread *poll_thr = _poll_thr;
+	struct event_base *base = poll_thr->ctx->base;
 
 	while (1) {
 		rv = WaitForMultipleObjects(
@@ -421,9 +416,9 @@ poll_thread_loop(void *_poll_thr)
 		if (rv == 0)
 			return 0;
 
-		IOCP_ACQUIRE_LOCK(poll_thr->ctx);
+		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 		poll_thread_post(poll_thr, rv);
-		IOCP_RELEASE_LOCK(poll_thr->ctx);
+		EVBASE_RELEASE_LOCK(base, th_base_lock);
 	}
 
 	return 0;
@@ -848,15 +843,15 @@ iocp_flush(struct event_base *base)
 	struct iocp_event *iev;
 	short what;
 
-	IOCP_RELEASE_LOCK(ctx);
+	EVBASE_RELEASE_LOCK(base, th_base_lock);
 
 	while ((rv = iocp_fetch_one(ctx, 0, &iev, &what)) == 1) {
-		IOCP_ACQUIRE_LOCK(ctx);
+		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 		iocp_active(base, iev, what);
-		IOCP_RELEASE_LOCK(ctx);
+		EVBASE_RELEASE_LOCK(base, th_base_lock);
 	}
 
-	IOCP_ACQUIRE_LOCK(ctx);
+	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
 	return rv;
 }
@@ -884,8 +879,8 @@ iocp_loop_init(struct event_base *base)
 
 	TAILQ_INIT(&ctx->notify_pool);
 	TAILQ_INIT(&ctx->overlapped_queue);
-	InitializeCriticalSectionAndSpinCount(&ctx->lock, 2000);
 	ctx->iocp = iocp;
+	ctx->base = base;
 
 	evsig_init(base);
 
@@ -907,32 +902,22 @@ iocp_loop_dispatch(struct event_base *base, struct timeval *tv)
 	short what;
 	DWORD ms = INFINITE;
 
-	IOCP_ACQUIRE_LOCK(ctx);
-
-	ctx->nactivated = 0;
-
 	overlapped_queue_run_all(ctx);
 	// XXX err code
 
-	if (iocp_flush(base) < 0) {
-		rv = -1;
-		goto out;
-	}
+	if (iocp_flush(base) < 0)
+		return -1;
 
-	if (ctx->nactivated) {
-		rv = 0;
-		goto out;
-	}
+	if (ctx->nactivated)
+		return 0;
 
 	if (tv)
 		ms = tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000;
 
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
-	IOCP_RELEASE_LOCK(ctx);
 
 	rv = iocp_fetch_one(ctx, ms, &iev, &what);
 
-	IOCP_ACQUIRE_LOCK(ctx);
 	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
 	if (rv == 1) {
@@ -942,9 +927,6 @@ iocp_loop_dispatch(struct event_base *base, struct timeval *tv)
 
 	if (!ctx->nactivated || base->sig.evsig_caught)
 		evsig_process(base);
-
-out:
-	IOCP_RELEASE_LOCK(ctx);
 
 	return rv;
 }
@@ -975,8 +957,6 @@ iocp_loop_add(struct event_base *base, evutil_socket_t fd, short old,
 			return -1;
 	}
 
-	IOCP_ACQUIRE_LOCK(ctx);
-
 	iev = *ievp;
 
 	if (events & EV_READ) {
@@ -996,8 +976,6 @@ iocp_loop_add(struct event_base *base, evutil_socket_t fd, short old,
 			poll_thread_pool_add_event(ctx, iev);
 		iocp_event_update_event_selection(iev);
 	}	
-
-	IOCP_RELEASE_LOCK(ctx);
 
 	return 0;
 }
@@ -1023,8 +1001,6 @@ iocp_loop_del(struct event_base *base, evutil_socket_t fd, short old,
 	if (!*ievp)
 		return 0;
 
-	IOCP_ACQUIRE_LOCK(ctx);
-
 	iev = *ievp;
 
 	if (events & EV_READ) {
@@ -1046,8 +1022,6 @@ iocp_loop_del(struct event_base *base, evutil_socket_t fd, short old,
 		iocp_event_decref(iev);
 	}
 
-	IOCP_RELEASE_LOCK(ctx);
-
 	return 0;
 }
 
@@ -1060,11 +1034,9 @@ iocp_loop_dealloc(struct event_base *base)
 {
 	struct iocp_loop_ctx *ctx = base->evbase;
 
-	IOCP_ACQUIRE_LOCK(ctx);
 	poll_thread_pool_destroy(ctx);
 	CloseHandle(ctx->iocp);
 	// EVUTIL_ASSERT(!TAILQ_FIRST(&ctx->overlapped_queue));
-	IOCP_RELEASE_LOCK(ctx);
 	mm_free(ctx);
 }
 
