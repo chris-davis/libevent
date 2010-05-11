@@ -26,7 +26,6 @@
 
 #include "event-config.h"
 
-#define _REENTRANT
 #define _GNU_SOURCE
 
 #ifdef WIN32
@@ -52,6 +51,7 @@
 #include <stdlib.h>
 #endif
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef _EVENT_HAVE_ARPA_INET_H
@@ -206,7 +206,7 @@ evutil_socketpair(int family, int type, int protocol, evutil_socket_t fd[2])
 		goto tidy_up_and_fail;
 	if (size != sizeof(listen_addr))
 		goto abort_tidy_up_and_fail;
-	EVUTIL_CLOSESOCKET(listener);
+	evutil_closesocket(listener);
 	/* Now check we are talking to ourself by matching port and host on the
 	   two sockets.	 */
 	if (getsockname(connector, (struct sockaddr *) &connect_addr, &size) == -1)
@@ -227,11 +227,11 @@ evutil_socketpair(int family, int type, int protocol, evutil_socket_t fd[2])
 	if (saved_errno < 0)
 		saved_errno = WSAGetLastError();
 	if (listener != -1)
-		EVUTIL_CLOSESOCKET(listener);
+		evutil_closesocket(listener);
 	if (connector != -1)
-		EVUTIL_CLOSESOCKET(connector);
+		evutil_closesocket(connector);
 	if (acceptor != -1)
-		EVUTIL_CLOSESOCKET(acceptor);
+		evutil_closesocket(acceptor);
 
 	EVUTIL_SET_SOCKET_ERROR(saved_errno);
 	return -1;
@@ -294,6 +294,16 @@ evutil_make_socket_closeonexec(evutil_socket_t fd)
 	return 0;
 }
 
+int
+evutil_closesocket(evutil_socket_t sock)
+{
+#ifndef WIN32
+	return close(sock);
+#else
+	return closesocket(sock);
+#endif
+}
+
 ev_int64_t
 evutil_strtoll(const char *s, char **endptr, int base)
 {
@@ -323,6 +333,7 @@ evutil_strtoll(const char *s, char **endptr, int base)
 }
 
 #ifndef _EVENT_HAVE_GETTIMEOFDAY
+/* No gettimeofday; this muse be windows. */
 int
 evutil_gettimeofday(struct timeval *tv, struct timezone *tz)
 {
@@ -331,6 +342,14 @@ evutil_gettimeofday(struct timeval *tv, struct timezone *tz)
 	if (tv == NULL)
 		return -1;
 
+	/* XXXX
+	 * _ftime is not the greatest interface here; GetSystemTimeAsFileTime
+	 * would give us better resolution, whereas something cobbled together
+	 * with GetTickCount could maybe give us monotonic behavior.
+	 *
+	 * Either way, I think this value might be skewed to ignore the
+	 * timezone, and just return local time.  That's not so good.
+	 */
 	_ftime(&tb);
 	tv->tv_sec = (long) tb.time;
 	tv->tv_usec = ((int) tb.millitm) * 1000;
@@ -384,7 +403,7 @@ evutil_socket_connect(evutil_socket_t *fd_ptr, struct sockaddr *sa, int socklen)
 
 err:
 	if (made_fd) {
-		EVUTIL_CLOSESOCKET(*fd_ptr);
+		evutil_closesocket(*fd_ptr);
 		*fd_ptr = -1;
 	}
 	return -1;
@@ -487,7 +506,7 @@ evutil_check_interfaces(int force_recheck)
 		}
 	}
 	if (fd >= 0)
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 
 	if ((fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) >= 0 &&
 	    connect(fd, (struct sockaddr*)&sin6, sizeof(sin6)) == 0 &&
@@ -511,7 +530,7 @@ evutil_check_interfaces(int force_recheck)
 	}
 
 	if (fd >= 0)
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 
 	return 0;
 }
@@ -939,6 +958,10 @@ evutil_adjust_hints_for_addrconfig(struct evutil_addrinfo *hints)
 }
 
 #ifdef USE_NATIVE_GETADDRINFO
+static int need_numeric_port_hack_=0;
+static int need_socktype_protocol_hack_=0;
+static int tested_for_getaddrinfo_hacks=0;
+
 /* Some older BSDs (like OpenBSD up to 4.6) used to believe that
    giving a numeric port without giving an ai_socktype was verboten.
    We test for this so we can apply an appropriate workaround.  If it
@@ -953,17 +976,17 @@ evutil_adjust_hints_for_addrconfig(struct evutil_addrinfo *hints)
 
    We test for this bug at runtime, since otherwise we can't have the
    same binary run on multiple BSD versions.
+
+   - Some versions of Solaris believe that it's nice to leave to protocol
+     field set to 0.  We test for this so we can apply an appropriate
+     workaround.
 */
-static int
-need_numeric_port_hack(void)
+static void
+test_for_getaddrinfo_hacks(void)
 {
-	static int tested=0;
-	static int need_hack=0;
 	int r, r2;
 	struct evutil_addrinfo *ai=NULL, *ai2=NULL;
 	struct evutil_addrinfo hints;
-	if (tested)
-		return need_hack;
 
 	memset(&hints,0,sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
@@ -979,21 +1002,40 @@ need_numeric_port_hack(void)
 	hints.ai_socktype = SOCK_STREAM;
 	r2 = getaddrinfo("1.2.3.4", "80", &hints, &ai2);
 	if (r2 == 0 && r != 0) {
-		need_hack=1;
+		need_numeric_port_hack_=1;
 	}
+	if (ai2 && ai2->ai_protocol == 0) {
+		need_socktype_protocol_hack_=1;
+	}
+
 	if (ai)
 		freeaddrinfo(ai);
 	if (ai2)
 		freeaddrinfo(ai2);
-	tested = 1;
-	return need_hack;
+	tested_for_getaddrinfo_hacks=1;
+}
+
+static inline int
+need_numeric_port_hack(void)
+{
+	if (!tested_for_getaddrinfo_hacks)
+		test_for_getaddrinfo_hacks();
+	return need_numeric_port_hack_;
+}
+
+static inline int
+need_socktype_protocol_hack(void)
+{
+	if (!tested_for_getaddrinfo_hacks)
+		test_for_getaddrinfo_hacks();
+	return need_socktype_protocol_hack_;
 }
 
 static void
 apply_numeric_port_hack(int port, struct evutil_addrinfo **ai)
 {
 	/* Now we run through the list and set the ports on all of the
-	 * results where ports */
+	 * results where ports would make sense. */
 	for ( ; *ai; ai = &(*ai)->ai_next) {
 		struct sockaddr *sa = (*ai)->ai_addr;
 		if (sa && sa->sa_family == AF_INET) {
@@ -1010,6 +1052,26 @@ apply_numeric_port_hack(int port, struct evutil_addrinfo **ai)
 			victim->ai_next = NULL;
 			freeaddrinfo(victim);
 		}
+	}
+}
+
+static void
+apply_socktype_protocol_hack(struct evutil_addrinfo *ai)
+{
+	struct evutil_addrinfo *ai_new;
+	for (; ai; ai = ai->ai_next) {
+		evutil_getaddrinfo_infer_protocols(ai);
+		if (ai->ai_socktype || ai->ai_protocol)
+			continue;
+		ai_new = mm_malloc(sizeof(*ai_new));
+		memcpy(ai_new, ai, sizeof(*ai_new));
+		ai->ai_socktype = SOCK_STREAM;
+		ai->ai_protocol = IPPROTO_TCP;
+		ai_new->ai_socktype = SOCK_DGRAM;
+		ai_new->ai_protocol = IPPROTO_UDP;
+
+		ai_new->ai_next = ai->ai_next;
+		ai->ai_next = ai_new;
 	}
 }
 #endif
@@ -1080,6 +1142,10 @@ evutil_getaddrinfo(const char *nodename, const char *servname,
 		servname = NULL;
 	}
 
+	if (need_socktype_protocol_hack()) {
+		evutil_getaddrinfo_infer_protocols(&hints);
+	}
+
 	/* Make sure that we didn't actually steal any AI_FLAGS values that
 	 * the system is using.  (This is a constant expression, and should ge
 	 * optimized out.)
@@ -1095,6 +1161,10 @@ evutil_getaddrinfo(const char *nodename, const char *servname,
 	err = getaddrinfo(nodename, servname, &hints, res);
 	if (need_np_hack)
 		apply_numeric_port_hack(portnum, res);
+
+	if (need_socktype_protocol_hack()) {
+		apply_socktype_protocol_hack(*res);
+	}
 	return err;
 #else
 	int port=0, err;
@@ -1706,6 +1776,35 @@ evutil_parse_sockaddr_port(const char *ip_as_string, struct sockaddr *out, int *
 	}
 }
 
+const char *
+evutil_format_sockaddr_port(const struct sockaddr *sa, char *out, size_t outlen)
+{
+	char b[128];
+	const char *res=NULL;
+	int port;
+	if (sa->sa_family == AF_INET) {
+		const struct sockaddr_in *sin = (const struct sockaddr_in*)sa;
+		res = evutil_inet_ntop(AF_INET, &sin->sin_addr,b,sizeof(b));
+		port = ntohs(sin->sin_port);
+		if (res) {
+			evutil_snprintf(out, outlen, "%s:%d", b, port);
+			return out;
+		}
+	} else if (sa->sa_family == AF_INET6) {
+		const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6*)sa;
+		res = evutil_inet_ntop(AF_INET6, &sin6->sin6_addr,b,sizeof(b));
+		port = ntohs(sin6->sin6_port);
+		if (res) {
+			evutil_snprintf(out, outlen, "[%s]:%d", b, port);
+			return out;
+		}
+	}
+
+	evutil_snprintf(out, outlen, "<addr with socktype %d>",
+	    (int)sa->sa_family);
+	return out;
+}
+
 int
 evutil_sockaddr_cmp(const struct sockaddr *sa1, const struct sockaddr *sa2,
     int include_port)
@@ -1885,3 +1984,39 @@ evutil_sockaddr_is_loopback(const struct sockaddr *addr)
 	return 0;
 }
 
+#define MAX_SECONDS_IN_MSEC_LONG \
+	(((LONG_MAX) - 999) / 1000)
+
+long
+evutil_tv_to_msec(const struct timeval *tv)
+{
+	if (tv->tv_usec > 1000000 || tv->tv_sec > MAX_SECONDS_IN_MSEC_LONG)
+		return -1;
+
+	return (tv->tv_sec * 1000) + ((tv->tv_usec + 999) / 1000);
+}
+
+int
+evutil_hex_char_to_int(char c)
+{
+	switch(c)
+	{
+		case '0': return 0;
+		case '1': return 1;
+		case '2': return 2;
+		case '3': return 3;
+		case '4': return 4;
+		case '5': return 5;
+		case '6': return 6;
+		case '7': return 7;
+		case '8': return 8;
+		case '9': return 9;
+		case 'A': case 'a': return 10;
+		case 'B': case 'b': return 11;
+		case 'C': case 'c': return 12;
+		case 'D': case 'd': return 13;
+		case 'E': case 'e': return 14;
+		case 'F': case 'f': return 15;
+	}
+	return -1;
+}

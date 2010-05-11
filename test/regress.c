@@ -282,6 +282,8 @@ combined_write_cb(evutil_socket_t fd, short event, void *arg)
 	if (len > both->nread)
 		len = both->nread;
 
+	memset(buf, 'q', len);
+
 	len = write(fd, buf, len);
 	if (len == -1)
 		fprintf(stderr, "%s: write\n", __func__);
@@ -711,6 +713,7 @@ end:
 #ifndef WIN32
 static void signal_cb(evutil_socket_t fd, short event, void *arg);
 
+#define current_base event_global_current_base_
 extern struct event_base *current_base;
 
 static void
@@ -1150,6 +1153,40 @@ test_bad_assign(void *ptr)
 	r = event_assign(&ev, NULL, -1, EV_SIGNAL|EV_READ, dummy_read_cb, NULL);
 	tt_int_op(r,==,-1);
 
+end:
+	;
+}
+
+static int reentrant_cb_run = 0;
+
+static void
+bad_reentrant_run_loop_cb(evutil_socket_t fd, short what, void *ptr)
+{
+	struct event_base *base = ptr;
+	int r;
+	reentrant_cb_run = 1;
+	/* This reentrant call to event_base_loop should be detected and
+	 * should fail */
+	r = event_base_loop(base, 0);
+	tt_int_op(r, ==, -1);
+end:
+	;
+}
+
+static void
+test_bad_reentrant(void *ptr)
+{
+	struct basic_test_data *data = ptr;
+	struct event_base *base = data->base;
+	struct event ev;
+	int r;
+	event_assign(&ev, base, -1,
+	    0, bad_reentrant_run_loop_cb, base);
+
+	event_active(&ev, EV_WRITE, 1);
+	r = event_base_loop(base, 0);
+	tt_int_op(r, ==, 1);
+	tt_int_op(reentrant_cb_run, ==, 1);
 end:
 	;
 }
@@ -1794,6 +1831,18 @@ test_base_environ(void *arg)
 	int i, n_methods=0;
 	const char *defaultname;
 
+	/* See if unsetenv works before we rely on it. */
+	setenv("EVENT_NOWAFFLES", "1", 1);
+	unsetenv("EVENT_NOWAFFLES");
+	if (getenv("EVENT_NOWAFFLES") != NULL) {
+#ifndef _EVENT_HAVE_UNSETENV
+		TT_DECLARE("NOTE", ("Can't fake unsetenv; skipping test"));
+#else
+		TT_DECLARE("NOTE", ("unsetenv doesn't work; skipping test"));
+#endif
+		tt_skip();
+	}
+
 	basenames = event_get_supported_methods();
 	for (i = 0; basenames[i]; ++i) {
 		methodname_to_envvar(basenames[i], varbuf, sizeof(varbuf));
@@ -2012,9 +2061,11 @@ many_event_cb(evutil_socket_t fd, short event, void *arg)
 static void
 test_many_events(void *arg)
 {
-	/* Try 64 events that should all be aready at once.  This will
-	 * exercise the "resize" code on most of the backends. */
-#define MANY 64
+	/* Try 70 events that should all be aready at once.  This will
+	 * exercise the "resize" code on most of the backends, and will make
+	 * sure that we can get past the 64-handle limit of some windows
+	 * functions. */
+#define MANY 70
 
 	struct basic_test_data *data = arg;
 	struct event_base *base = data->base;
@@ -2050,7 +2101,7 @@ end:
 		if (ev[i])
 			event_free(ev[i]);
 		if (sock[i] >= 0)
-			EVUTIL_CLOSESOCKET(sock[i]);
+			evutil_closesocket(sock[i]);
 	}
 #undef MANY
 }
@@ -2068,6 +2119,7 @@ struct testcase_t main_testcases[] = {
 	BASIC(manipulate_active_events, TT_FORK|TT_NEED_BASE),
 
 	BASIC(bad_assign, TT_FORK|TT_NEED_BASE|TT_NO_LOGS),
+	BASIC(bad_reentrant, TT_FORK|TT_NEED_BASE|TT_NO_LOGS),
 
 	/* These are still using the old API */
 	LEGACY(persistent_timeout, TT_FORK|TT_NEED_BASE),

@@ -425,7 +425,7 @@ end:
 	if (port)
 		evdns_close_server_port(port);
 	if (sock >= 0)
-		EVUTIL_CLOSESOCKET(sock);
+		evutil_closesocket(sock);
 	if (base)
 		evdns_base_free(base, 0);
 }
@@ -438,7 +438,9 @@ struct generic_dns_callback_result {
 	char type;
 	int count;
 	int ttl;
+	size_t addrs_len;
 	void *addrs;
+	char addrs_buf[256];
 };
 
 static void
@@ -459,12 +461,15 @@ generic_dns_callback(int result, char type, int count, int ttl, void *addresses,
 	else if (type == DNS_PTR)
 		len = strlen(addresses)+1;
 	else {
-		len = 0;
+		res->addrs_len = len = 0;
 		res->addrs = NULL;
 	}
 	if (len) {
-		res->addrs = malloc(len);
-		memcpy(res->addrs, addresses, len);
+		res->addrs_len = len;
+		if (len > 256)
+			len = 256;
+		memcpy(res->addrs_buf, addresses, len);
+		res->addrs = res->addrs_buf;
 	}
 
 	if (--n_replies_left == 0)
@@ -530,6 +535,71 @@ end:
 		evdns_base_free(dns, 0);
 
 	regress_clean_dnsserver();
+}
+
+static int request_count = 0;
+static struct evdns_request *current_req = NULL;
+
+static void
+search_cancel_server_cb(struct evdns_server_request *req, void *data)
+{
+	const char *question;
+
+	if (req->nquestions != 1)
+		TT_DIE(("Only handling one question at a time; got %d",
+			req->nquestions));
+
+	question = req->questions[0]->name;
+
+	TT_BLATHER(("got question, %s", question));
+
+	tt_assert(request_count > 0);
+	tt_assert(!evdns_server_request_respond(req, 3));
+
+	if (!--request_count)
+		evdns_cancel_request(NULL, current_req);
+
+end:
+	;
+}
+
+static void
+dns_search_cancel_test(void *arg)
+{
+	struct basic_test_data *data = arg;
+	struct event_base *base = data->base;
+	struct evdns_base *dns = NULL;
+	struct evdns_server_port *port = NULL;
+	ev_uint16_t portnum = 53900;/*XXXX let the code pick a port*/
+	struct generic_dns_callback_result r1;
+
+	port = regress_get_dnsserver(base, &portnum, NULL,
+	    search_cancel_server_cb, NULL);
+	tt_assert(port);
+
+	dns = evdns_base_new(base, 0);
+	tt_assert(!evdns_base_nameserver_ip_add(dns, "127.0.0.1:53900"));
+
+	evdns_base_search_add(dns, "a.example.com");
+	evdns_base_search_add(dns, "b.example.com");
+	evdns_base_search_add(dns, "c.example.com");
+	evdns_base_search_add(dns, "d.example.com");
+
+	exit_base = base;
+	request_count = 3;
+	n_replies_left = 1;
+	
+	current_req = evdns_base_resolve_ipv4(dns, "host", 0,
+					generic_dns_callback, &r1);
+	event_base_dispatch(base);
+
+	tt_int_op(r1.result, ==, DNS_ERR_CANCEL);
+
+end:
+	if (port)
+		evdns_close_server_port(port);
+	if (dns)
+		evdns_base_free(dns, 0);
 }
 
 static void
@@ -899,26 +969,37 @@ nil_accept_cb(struct evconnlistener *l, evutil_socket_t fd, struct sockaddr *s,
 	/* don't do anything with the socket; let it close when we exit() */
 }
 
+struct be_conn_hostname_result {
+	int dnserr;
+	int what;
+};
+
 /* Bufferevent event callback for the connect_hostname test: remembers what
  * event we got. */
 static void
 be_connect_hostname_event_cb(struct bufferevent *bev, short what, void *ctx)
 {
-	int *got = ctx;
-	if (!*got) {
+	struct be_conn_hostname_result *got = ctx;
+	if (!got->what) {
 		TT_BLATHER(("Got a bufferevent event %d", what));
-		*got = what;
+		got->what = what;
 
 		if ((what & BEV_EVENT_CONNECTED) || (what & BEV_EVENT_ERROR)) {
+			int r;
 			++total_connected_or_failed;
 			TT_BLATHER(("Got %d connections or errors.", total_connected_or_failed));
+			if ((r = bufferevent_socket_get_dns_error(bev))) {
+				got->dnserr = r;
+				TT_BLATHER(("DNS error %d: %s", r,
+					   evutil_gai_strerror(r)));
+			}
 			if (total_connected_or_failed >= 5)
 				event_base_loopexit(be_connect_hostname_base,
 				    NULL);
 		}
 	} else {
 		TT_FAIL(("Two events on one bufferevent. %d,%d",
-			(int)*got, (int)what));
+			got->what, (int)what));
 	}
 }
 
@@ -928,8 +1009,9 @@ test_bufferevent_connect_hostname(void *arg)
 	struct basic_test_data *data = arg;
 	struct evconnlistener *listener = NULL;
 	struct bufferevent *be1=NULL, *be2=NULL, *be3=NULL, *be4=NULL, *be5=NULL;
-	int be1_outcome=0, be2_outcome=0, be3_outcome=0, be4_outcome=0,
-	    be5_outcome=0;
+	struct be_conn_hostname_result be1_outcome={0,0}, be2_outcome={0,0},
+	       be3_outcome={0,0}, be4_outcome={0,0}, be5_outcome={0,0};
+	int expect_err5;
 	struct evdns_base *dns=NULL;
 	struct evdns_server_port *port=NULL;
 	evutil_socket_t server_fd=-1;
@@ -999,14 +1081,33 @@ test_bufferevent_connect_hostname(void *arg)
 	/* Use the blocking resolver with a nonexistent hostname. */
 	tt_assert(!bufferevent_socket_connect_hostname(be5, NULL, AF_INET,
 		"nonesuch.nowhere.example.com", 80));
+	{
+		/* The blocking resolver will use the system nameserver, which
+		 * might tell us anything.  (Yes, some twits even pretend that
+		 * example.com is real.) Let's see what answer to expect. */
+		struct evutil_addrinfo hints, *ai = NULL;
+		memset(&hints, 0, sizeof(hints));
+		hints.ai_family = PF_UNSPEC;
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_protocol = IPPROTO_TCP;
+		expect_err5 = evutil_getaddrinfo(
+			"nonesuch.nowhere.example.com", "80", &hints, &ai);
+	}
 
 	event_base_dispatch(data->base);
 
-	tt_int_op(be1_outcome, ==, BEV_EVENT_ERROR);
-	tt_int_op(be2_outcome, ==, BEV_EVENT_CONNECTED);
-	tt_int_op(be3_outcome, ==, BEV_EVENT_CONNECTED);
-	tt_int_op(be4_outcome, ==, BEV_EVENT_CONNECTED);
-	tt_int_op(be5_outcome, ==, BEV_EVENT_ERROR);
+	tt_int_op(be1_outcome.what, ==, BEV_EVENT_ERROR);
+	tt_int_op(be1_outcome.dnserr, ==, EVUTIL_EAI_NONAME);
+	tt_int_op(be2_outcome.what, ==, BEV_EVENT_CONNECTED);
+	tt_int_op(be2_outcome.dnserr, ==, 0);
+	tt_int_op(be3_outcome.what, ==, BEV_EVENT_CONNECTED);
+	tt_int_op(be3_outcome.dnserr, ==, 0);
+	tt_int_op(be4_outcome.what, ==, BEV_EVENT_CONNECTED);
+	tt_int_op(be4_outcome.dnserr, ==, 0);
+	if (expect_err5) {
+		tt_int_op(be5_outcome.what, ==, BEV_EVENT_ERROR);
+		tt_int_op(be5_outcome.dnserr, ==, expect_err5);
+	}
 
 	tt_int_op(n_accept, ==, 3);
 	tt_int_op(n_dns, ==, 2);
@@ -1015,7 +1116,7 @@ end:
 	if (listener)
 		evconnlistener_free(listener);
 	if (server_fd>=0)
-		EVUTIL_CLOSESOCKET(server_fd);
+		evutil_closesocket(server_fd);
 	if (port)
 		evdns_close_server_port(port);
 	if (dns)
@@ -1442,6 +1543,8 @@ struct testcase_t dns_testcases[] = {
 	DNS_LEGACY(gethostbyaddr, TT_FORK|TT_NEED_BASE|TT_NEED_DNS),
 	{ "resolve_reverse", dns_resolve_reverse, TT_FORK, NULL, NULL },
 	{ "search", dns_search_test, TT_FORK|TT_NEED_BASE, &basic_setup, NULL },
+	{ "search_cancel", dns_search_cancel_test,
+	  TT_FORK|TT_NEED_BASE, &basic_setup, NULL },
 	{ "retry", dns_retry_test, TT_FORK|TT_NEED_BASE, &basic_setup, NULL },
 	{ "reissue", dns_reissue_test, TT_FORK|TT_NEED_BASE, &basic_setup, NULL },
 	{ "inflight", dns_inflight_test, TT_FORK|TT_NEED_BASE, &basic_setup, NULL },

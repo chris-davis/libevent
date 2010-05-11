@@ -66,17 +66,6 @@ static void be_async_destruct(struct bufferevent *);
 static int be_async_flush(struct bufferevent *, short, enum bufferevent_flush_mode);
 static int be_async_ctrl(struct bufferevent *, enum bufferevent_ctrl_op, union bufferevent_ctrl_data *);
 
-const struct bufferevent_ops bufferevent_ops_async = {
-	"socket_async",
-	0,
-	be_async_enable,
-	be_async_disable,
-	be_async_destruct,
-	_bufferevent_generic_adj_timeouts,
-	be_async_flush,
-	be_async_ctrl,
-};
-
 struct bufferevent_async {
 	struct bufferevent_private bev;
 	struct event_overlapped connect_overlapped;
@@ -85,6 +74,17 @@ struct bufferevent_async {
 	unsigned read_in_progress : 1;
 	unsigned write_in_progress : 1;
 	unsigned ok : 1;
+};
+
+const struct bufferevent_ops bufferevent_ops_async = {
+	"socket_async",
+	evutil_offsetof(struct bufferevent_async, bev.bev),
+	be_async_enable,
+	be_async_disable,
+	be_async_destruct,
+	_bufferevent_generic_adj_timeouts,
+	be_async_flush,
+	be_async_ctrl,
 };
 
 static inline struct bufferevent_async *
@@ -285,7 +285,7 @@ be_async_destruct(struct bufferevent *bev)
 	/* delete this in case non-blocking connect was used */
 	event_del(&bev->ev_write);
 	if (bev_p->options & BEV_OPT_CLOSE_ON_FREE)
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 	_bufferevent_del_generic_timeout_cbs(bev);
 }
 

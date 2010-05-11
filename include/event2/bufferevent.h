@@ -119,7 +119,13 @@ enum bufferevent_options {
 	BEV_OPT_THREADSAFE = (1<<1),
 
 	/** If set, callbacks are run deferred in the event loop. */
-	BEV_OPT_DEFER_CALLBACKS = (1<<2)
+	BEV_OPT_DEFER_CALLBACKS = (1<<2),
+
+	/** If set, callbacks are executed without locks being held on the
+	* bufferevent.  This option currently requires that
+	* BEV_OPT_DEFER_CALLBACKS also be set; a future version of Libevent
+	* might remove the requirement.*/
+	BEV_OPT_UNLOCK_CALLBACKS = (1<<3)
 };
 
 /**
@@ -184,6 +190,16 @@ struct evdns_base;
  */
 int bufferevent_socket_connect_hostname(struct bufferevent *b,
     struct evdns_base *, int, const char *, int);
+
+/**
+   Return the error code for the last failed DNS lookup attempt made by
+   bufferevent_socket_connect_hostname().
+
+   @param bev The bufferevent object.
+   @return DNS error code.
+   @see evutil_gai_strerror()
+*/
+int bufferevent_socket_get_dns_error(struct bufferevent *bev);
 
 /**
   Assign a bufferevent to a specific event_base.
@@ -585,8 +601,19 @@ int bufferevent_set_rate_limit(struct bufferevent *bev,
 struct bufferevent_rate_limit_group *bufferevent_rate_limit_group_new(
 	struct event_base *base,
 	const struct ev_token_bucket_cfg *cfg);
-/*XXX we need a bufferevent_rate_limit_group_set_cfg */
-/*XXX we need a bufferevent_rate_limit_group_free */
+/**
+   Change the rate-limiting settings for a given rate-limiting group.
+
+   Return 0 on success, -1 on failure.
+*/
+int bufferevent_rate_limit_group_set_cfg(
+	struct bufferevent_rate_limit_group *,
+	const struct ev_token_bucket_cfg *);
+/**
+   Free a rate-limiting group.  The group must have no members when
+   this function is called.
+*/
+void bufferevent_rate_limit_group_free(struct bufferevent_rate_limit_group *);
 
 /**
    Add 'bev' to the list of bufferevents whose aggregate reading and writing
@@ -662,6 +689,19 @@ int bufferevent_rate_limit_group_decrement_write(
 	struct bufferevent_rate_limit_group *, ev_ssize_t);
 /*@}*/
 
+
+/** Set the variable pointed to by total_read_out to the total number of bytes
+ * ever read on grp, and the variable pointed to by total_written_out to the
+ * total number of bytes ever written on grp. */
+void bufferevent_rate_limit_group_get_totals(
+    struct bufferevent_rate_limit_group *grp,
+    ev_uint64_t *total_read_out, ev_uint64_t *total_written_out);
+
+/** Reset the number of bytes read or written on grp as given by
+ * bufferevent_rate_limit_group_reset_totals(). */
+void
+bufferevent_rate_limit_group_reset_totals(
+	struct bufferevent_rate_limit_group *grp);
 
 #ifdef __cplusplus
 }

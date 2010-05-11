@@ -91,7 +91,7 @@ extern const struct eventop win32ops;
 extern const struct eventop iocpops;
 #endif
 
-/* In order of preference */
+/* Array of backends in order of preference. */
 static const struct eventop *eventops[] = {
 #ifdef _EVENT_HAVE_EVENT_PORTS
 	&evportops,
@@ -118,9 +118,13 @@ static const struct eventop *eventops[] = {
 	NULL
 };
 
-/* Global state */
-struct event_base *current_base = NULL;
+/* Global state; deprecated */
+struct event_base *event_global_current_base_ = NULL;
+#define current_base event_global_current_base_
 extern struct event_base *evsig_base;
+
+/* Global state */
+
 static int use_monotonic;
 
 /* Prototypes */
@@ -178,6 +182,8 @@ eq_debug_entry(const struct event_debug_entry *a,
 }
 
 int _event_debug_mode_on = 0;
+/* Set if it's too late to enable event_debug_mode. */
+static int event_debug_mode_too_late = 0;
 static void *_event_debug_map_lock = NULL;
 static HT_HEAD(event_debug_map, event_debug_entry) global_debug_map =
 	HT_INITIALIZER();
@@ -187,6 +193,7 @@ HT_PROTOTYPE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
     eq_debug_entry, 0.5, mm_malloc, mm_realloc, mm_free);
 
+/* Macro: record that ev is now setup (that is, ready for an add) */
 #define _event_debug_note_setup(ev) do {				\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -206,7 +213,9 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 		}							\
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
+	event_debug_mode_too_late = 1;					\
 	} while (0)
+/* Macro: record that ev is no longer setup */
 #define _event_debug_note_teardown(ev) do {				\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -217,7 +226,9 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 			mm_free(dent);					\
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
+	event_debug_mode_too_late = 1;					\
 	} while (0)
+/* Macro: record that ev is now added */
 #define _event_debug_note_add(ev)	do {				\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -233,7 +244,9 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 		}							\
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
+	event_debug_mode_too_late = 1;					\
 	} while (0)
+/* Macro: record that ev is no longer added */
 #define _event_debug_note_del(ev) do {					\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -249,7 +262,9 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 		}							\
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
+	event_debug_mode_too_late = 1;					\
 	} while (0)
+/* Macro: assert that ev is setup (i.e., okay to add or inspect) */
 #define _event_debug_assert_is_setup(ev) do {				\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -264,7 +279,8 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
 	} while (0)
-
+/* Macro: assert that ev is not added (i.e., okay to tear down or set
+ * up again) */
 #define _event_debug_assert_not_added(ev) do {				\
 	if (_event_debug_mode_on) {					\
 		struct event_debug_entry *dent,find;			\
@@ -279,7 +295,6 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 		EVLOCK_UNLOCK(_event_debug_map_lock, 0);		\
 	}								\
 	} while (0)
-
 #else
 #define _event_debug_note_setup(ev) \
 	((void)0)
@@ -298,6 +313,8 @@ HT_GENERATE(event_debug_map, event_debug_entry, node, hash_debug_entry,
 #define EVENT_BASE_ASSERT_LOCKED(base)		\
 	EVLOCK_ASSERT_LOCKED((base)->th_base_lock)
 
+/* The first time this function is called, it sets use_monotonic to 1
+ * if we have a clock function that supports monotonic time */
 static void
 detect_monotonic(void)
 {
@@ -315,6 +332,11 @@ detect_monotonic(void)
 #endif
 }
 
+/** Set 'tp' to the current time according to 'base'.  We must hold the lock
+ * on 'base'.  If there is a cached time, return it.  Otherwise, use
+ * clock_gettime or gettimeofday as appropriate to find out the right time.
+ * Return 0 on success, -1 on failure.
+ */
 static int
 gettime(struct event_base *base, struct timeval *tp)
 {
@@ -357,12 +379,14 @@ event_base_gettimeofday_cached(struct event_base *base, struct timeval *tv)
 	return r;
 }
 
+/** Make 'base' have no current cached time. */
 static inline void
 clear_time_cache(struct event_base *base)
 {
 	base->tv_cache.tv_sec = 0;
 }
 
+/** Replace the cached time in 'base' with the current time. */
 static inline void
 update_time_cache(struct event_base *base)
 {
@@ -398,6 +422,8 @@ event_base_new(void)
 	return base;
 }
 
+/** Return true iff 'method' is the name of a method that 'cfg' tells us to
+ * avoid. */
 static int
 event_config_is_avoided_method(const struct event_config *cfg,
     const char *method)
@@ -413,6 +439,7 @@ event_config_is_avoided_method(const struct event_config *cfg,
 	return (0);
 }
 
+/** Return true iff 'method' is disabled according to the environment. */
 static int
 event_is_method_disabled(const char *name)
 {
@@ -422,6 +449,8 @@ event_is_method_disabled(const char *name)
 	evutil_snprintf(environment, sizeof(environment), "EVENT_NO%s", name);
 	for (i = 8; environment[i] != '\0'; ++i)
 		environment[i] = toupper(environment[i]);
+	/* Note that evutil_getenv() ignores the environment entirely if
+	 * we're setuid */
 	return (evutil_getenv(environment) != NULL);
 }
 
@@ -438,12 +467,13 @@ event_deferred_cb_queue_init(struct deferred_cb_queue *cb)
 	TAILQ_INIT(&cb->deferred_cb_list);
 }
 
+/** Helper for the deferred_cb queue: wake up the event base. */
 static void
 notify_base_cbq_callback(struct deferred_cb_queue *cb, void *baseptr)
 {
 	struct event_base *base = baseptr;
 	if (!EVBASE_IN_THREAD(base))
-	    evthread_notify_base(base);
+		evthread_notify_base(base);
 }
 
 struct deferred_cb_queue *
@@ -458,6 +488,9 @@ event_enable_debug_mode(void)
 #ifndef _EVENT_DISABLE_DEBUG_MODE
 	if (_event_debug_mode_on)
 		event_errx(1, "%s was called twice!", __func__);
+	if (event_debug_mode_too_late)
+		event_errx(1, "%s must be called *before* creating any events "
+		    "or event_bases",__func__);
 
 	_event_debug_mode_on = 1;
 
@@ -492,6 +525,7 @@ event_base_new_with_config(const struct event_config *cfg)
 	int should_check_environment;
 
 #ifndef _EVENT_DISABLE_DEBUG_MODE
+	event_debug_mode_too_late = 1;
 	if (_event_debug_mode_on && !_event_debug_map_lock) {
 		EVTHREAD_ALLOC_LOCK(_event_debug_map_lock, 0);
 	}
@@ -627,7 +661,8 @@ event_base_free(struct event_base *base)
 	if (base->th_notify_fd[0] != -1) {
 		event_del(&base->th_notify);
 		EVUTIL_CLOSESOCKET(base->th_notify_fd[0]);
-		EVUTIL_CLOSESOCKET(base->th_notify_fd[1]);
+		if (base->th_notify_fd[1] != -1)
+			EVUTIL_CLOSESOCKET(base->th_notify_fd[1]);
 		base->th_notify_fd[0] = -1;
 		base->th_notify_fd[1] = -1;
 		event_debug_unassign(&base->th_notify);
@@ -901,6 +936,7 @@ event_base_priority_init(struct event_base *base, int npriorities)
 	return (0);
 }
 
+/* Returns true iff we're currently watching any events. */
 static int
 event_haveevents(struct event_base *base)
 {
@@ -908,6 +944,7 @@ event_haveevents(struct event_base *base)
 	return (base->event_count > 0);
 }
 
+/* "closure" function called when processing active signal events */
 static inline void
 event_signal_closure(struct event_base *base, struct event *ev)
 {
@@ -929,6 +966,20 @@ event_signal_closure(struct event_base *base, struct event *ev)
 	}
 }
 
+/* Common timeouts are special timeouts that are handled as queues rather than
+ * in the minheap.  This is more efficient than the minheap if we happen to
+ * know that we're going to get several thousands of timeout events all with
+ * the same timeout value.
+ *
+ * Since all our timeout handling code assumes timevals can be copied,
+ * assigned, etc, we can't use "magic pointer" to encode these common
+ * timeouts.  Searching through a list to see if every timeout is common could
+ * also get inefficient.  Instead, we take advantage of the fact that tv_usec
+ * is 32 bits long, but only uses 20 of those bits (since it can never be over
+ * 999999.)  We use the top bits to encode 4 bites of magic number, and 8 bits
+ * of index into the event_base's aray of common timeouts.
+ */
+
 #define MICROSECONDS_MASK       0x000fffff
 #define COMMON_TIMEOUT_IDX_MASK 0x0ff00000
 #define COMMON_TIMEOUT_IDX_SHIFT 20
@@ -938,6 +989,7 @@ event_signal_closure(struct event_base *base, struct event *ev)
 #define COMMON_TIMEOUT_IDX(tv) \
 	(((tv)->tv_usec & COMMON_TIMEOUT_IDX_MASK)>>COMMON_TIMEOUT_IDX_SHIFT)
 
+/** Return true iff if 'tv' is a common timeout in 'base' */
 static inline int
 is_common_timeout(const struct timeval *tv,
     const struct event_base *base)
@@ -958,12 +1010,15 @@ is_same_common_timeout(const struct timeval *tv1, const struct timeval *tv2)
 	    (tv2->tv_usec & ~MICROSECONDS_MASK);
 }
 
+/** Requires that 'tv' is a common timeout.  Return the corresponding
+ * common_timeout_list. */
 static inline struct common_timeout_list *
 get_common_timeout_list(struct event_base *base, const struct timeval *tv)
 {
 	return base->common_timeout_queues[COMMON_TIMEOUT_IDX(tv)];
 }
 
+#if 0
 static inline int
 common_timeout_ok(const struct timeval *tv,
     struct event_base *base)
@@ -973,7 +1028,10 @@ common_timeout_ok(const struct timeval *tv,
 	return tv->tv_sec == expect->tv_sec &&
 	    tv->tv_usec == expect->tv_usec;
 }
+#endif
 
+/* Add the timeout for the first event in given common timeout list to the
+ * event_base's minheap. */
 static void
 common_timeout_schedule(struct common_timeout_list *ctl,
     const struct timeval *now, struct event *head)
@@ -983,6 +1041,9 @@ common_timeout_schedule(struct common_timeout_list *ctl,
 	event_add_internal(&ctl->timeout_event, &timeout, 1);
 }
 
+/* Callback: invoked when the timeout for a common timeout queue triggers.
+ * This means that (at least) the first event in that queue should be run,
+ * and the timeout should be rescheduled if there are more events. */
 static void
 common_timeout_callback(evutil_socket_t fd, short what, void *arg)
 {
@@ -1082,6 +1143,7 @@ done:
 	return result;
 }
 
+/* Closure function invoked when we're activating a persistent event. */
 static inline void
 event_persist_closure(struct event_base *base, struct event *ev)
 {
@@ -1184,6 +1246,11 @@ event_process_active_single_queue(struct event_base *base,
 	return count;
 }
 
+/*
+   Process all the defered_cb entries in 'queue'.  If *breakptr becomes set to
+   1, stop.  Requires that we start out holding the lock on 'queue'; releases
+   the lock around 'queue' for each deferred_cb we process.
+ */
 static int
 event_process_deferred_callbacks(struct deferred_cb_queue *queue, int *breakptr)
 {
@@ -1259,6 +1326,8 @@ event_base_get_method(const struct event_base *base)
 	return (base->evsel->name);
 }
 
+/** Callback: used to implement event_base_loopexit by telling the event_base
+ * that it's time to exit its loop. */
 static void
 event_loopexit_cb(evutil_socket_t fd, short what, void *arg)
 {
@@ -1266,7 +1335,6 @@ event_loopexit_cb(evutil_socket_t fd, short what, void *arg)
 	base->event_gotterm = 1;
 }
 
-/* not thread safe */
 int
 event_loopexit(const struct timeval *tv)
 {
@@ -1344,6 +1412,15 @@ event_base_loop(struct event_base *base, int flags)
 	 * as we invoke user callbacks. */
 	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
+	if (base->running_loop) {
+		event_warn("%s: reentrant invocation.  Only one event_base_loop"
+		    " can run on each event_base at once.", __func__);
+		EVBASE_RELEASE_LOCK(base, th_base_lock);
+		return -1;
+	}
+
+	base->running_loop = 1;
+
 	clear_time_cache(base);
 
 	if (base->sig.ev_signal_added)
@@ -1415,6 +1492,7 @@ event_base_loop(struct event_base *base, int flags)
 
 done:
 	clear_time_cache(base);
+	base->running_loop = 0;
 
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 
@@ -1422,7 +1500,6 @@ done:
 }
 
 /* Sets up an event for processing once */
-
 struct event_once {
 	struct event ev;
 
@@ -1430,8 +1507,8 @@ struct event_once {
 	void *arg;
 };
 
-/* One-time callback, it deletes itself */
-
+/* One-time callback to implement event_base_once: invokes the user callback,
+ * then deletes the allocated storage */
 static void
 event_once_cb(evutil_socket_t fd, short events, void *arg)
 {
@@ -1746,6 +1823,10 @@ event_add(struct event *ev, const struct timeval *tv)
 	return (res);
 }
 
+/* Helper callback: wake an event_base from another thread.  This version
+ * works by writing a byte to one end of a socketpair, so that the event_base
+ * listening on the other end will wake up as the corresponding event
+ * triggers */
 static int
 evthread_notify_base_default(struct event_base *base)
 {
@@ -1761,6 +1842,8 @@ evthread_notify_base_default(struct event_base *base)
 }
 
 #if defined(_EVENT_HAVE_EVENTFD) && defined(_EVENT_HAVE_SYS_EVENTFD_H)
+/* Helper callback: wake an event_base from another thread.  This version
+ * assumes that you have a working eventfd() implementation. */
 static int
 evthread_notify_base_eventfd(struct event_base *base)
 {
@@ -1774,6 +1857,9 @@ evthread_notify_base_eventfd(struct event_base *base)
 }
 #endif
 
+/** Tell the thread currently running the event_loop for base (if any) that it
+ * needs to stop waiting in its dispatch function (if it is) and process all
+ * active events and deferred callbacks (if there are any).  */
 static int
 evthread_notify_base(struct event_base *base)
 {
@@ -1782,6 +1868,10 @@ evthread_notify_base(struct event_base *base)
 	return base->th_notify_fn(base);
 }
 
+/* Implementation function to add an event.  Works just like event_add,
+ * except: 1) it requires that we have the lock.  2) if tv_is_absolute is set,
+ * we treat tv as an absolute time, not as an interval to add to the current
+ * time */
 static inline int
 event_add_internal(struct event *ev, const struct timeval *tv,
     int tv_is_absolute)
@@ -2091,6 +2181,8 @@ event_deferred_cb_schedule(struct deferred_cb_queue *queue,
 		cb->queued = 1;
 		TAILQ_INSERT_TAIL(&queue->deferred_cb_list, cb, cb_next);
 		++queue->active_count;
+		/* XXXX Can we get away with doing this only when adding
+		 * the first active deferred_cb to the queue? */
 		if (queue->notify_fn)
 			queue->notify_fn(queue, queue->notify_arg);
 	}
@@ -2135,11 +2227,11 @@ out:
 }
 
 /*
- * Determines if the time is running backwards by comparing the current
- * time against the last time we checked.  Not needed when using clock
- * monotonic.
+ * Determines if the time is running backwards by comparing the current time
+ * against the last time we checked.  Not needed when using clock monotonic.
+ * If time is running backwards, we adjust the firing time of every event by
+ * the amount that time seems to have jumped.
  */
-
 static void
 timeout_correct(struct event_base *base, struct timeval *tv)
 {
@@ -2166,7 +2258,7 @@ timeout_correct(struct event_base *base, struct timeval *tv)
 
 	/*
 	 * We can modify the key element of the node without destroying
-	 * the key, because we apply it to all in the right order.
+	 * the minheap property, because we change every element.
 	 */
 	pev = base->timeheap.p;
 	size = base->timeheap.n;
@@ -2192,6 +2284,7 @@ timeout_correct(struct event_base *base, struct timeval *tv)
 	base->event_tv = *tv;
 }
 
+/* Activate every event whose timeout has elapsed. */
 static void
 timeout_process(struct event_base *base)
 {
@@ -2218,6 +2311,7 @@ timeout_process(struct event_base *base)
 	}
 }
 
+/* Remove 'ev' from 'queue' (EVLIST_...) in base. */
 static void
 event_queue_remove(struct event_base *base, struct event *ev, int queue)
 {
@@ -2257,13 +2351,21 @@ event_queue_remove(struct event_base *base, struct event *ev, int queue)
 	}
 }
 
+/* Add 'ev' to the common timeout list in 'ev'. */
 static void
 insert_common_timeout_inorder(struct common_timeout_list *ctl,
     struct event *ev)
 {
 	struct event *e;
+	/* By all logic, we should just be able to append 'ev' to the end of
+	 * ctl->events, since the timeout on each 'ev' is set to {the common
+	 * timeout} + {the time when we add the event}, and so the events
+	 * should arrive in order of their timeeouts.  But just in case
+	 * there's some wacky threading issue going on, we do a search from
+	 * the end of 'ev' to find the right insertion point.
+	 */
 	TAILQ_FOREACH_REVERSE(e, &ctl->events,
-	    ev_timeout_pos.ev_next_with_common_timeout, event_list) {
+	    event_list, ev_timeout_pos.ev_next_with_common_timeout) {
 		/* This timercmp is a little sneaky, since both ev and e have
 		 * magic values in tv_usec.  Fortunately, they ought to have
 		 * the _same_ magic values in tv_usec.  Let's assert for that.
@@ -2353,7 +2455,7 @@ static void *(*_mm_realloc_fn)(void *p, size_t sz) = NULL;
 static void (*_mm_free_fn)(void *p) = NULL;
 
 void *
-mm_malloc(size_t sz)
+event_mm_malloc_(size_t sz)
 {
 	if (_mm_malloc_fn)
 		return _mm_malloc_fn(sz);
@@ -2362,7 +2464,7 @@ mm_malloc(size_t sz)
 }
 
 void *
-mm_calloc(size_t count, size_t size)
+event_mm_calloc_(size_t count, size_t size)
 {
 	if (_mm_malloc_fn) {
 		size_t sz = count * size;
@@ -2375,7 +2477,7 @@ mm_calloc(size_t count, size_t size)
 }
 
 char *
-mm_strdup(const char *str)
+event_mm_strdup_(const char *str)
 {
 	if (_mm_malloc_fn) {
 		size_t ln = strlen(str);
@@ -2392,7 +2494,7 @@ mm_strdup(const char *str)
 }
 
 void *
-mm_realloc(void *ptr, size_t sz)
+event_mm_realloc_(void *ptr, size_t sz)
 {
 	if (_mm_realloc_fn)
 		return _mm_realloc_fn(ptr, sz);
@@ -2401,7 +2503,7 @@ mm_realloc(void *ptr, size_t sz)
 }
 
 void
-mm_free(void *ptr)
+event_mm_free_(void *ptr)
 {
 	if (_mm_free_fn)
 		_mm_free_fn(ptr);
@@ -2425,8 +2527,12 @@ static void
 evthread_notify_drain_eventfd(evutil_socket_t fd, short what, void *arg)
 {
 	ev_uint64_t msg;
+	ev_ssize_t r;
 
-	read(fd, (void*) &msg, sizeof(msg));
+	r = read(fd, (void*) &msg, sizeof(msg));
+	if (r<0 && errno != EAGAIN) {
+		event_sock_warn(fd, "Error reading from eventfd");
+	}
 }
 #endif
 

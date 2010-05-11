@@ -1,5 +1,6 @@
 /* Portable arc4random.c based on arc4random.c from OpenBSD.
  * Portable version by Chris Davis, adapted for Libevent by Nick Mathewson
+ * Copyright (c) 2010 Chris Davis, Niels Provos, and Nick Mathewson
  *
  * Note that in Libevent, this file isn't compiled directly.  Instead,
  * it's included from evutil_rand.c
@@ -56,6 +57,9 @@
 #include <unistd.h>
 #include <sys/param.h>
 #include <sys/time.h>
+#ifdef _EVENT_HAVE_SYS_SYSCTL_H
+#include <sys/sysctl.h>
+#endif
 #endif
 #include <limits.h>
 #include <stdlib.h>
@@ -135,29 +139,20 @@ read_all(int fd, unsigned char *buf, size_t count)
 }
 #endif
 
-/* This is adapted from Tor's crypto_seed_rng() */
-static int
-arc4_seed(void)
-{
-	unsigned char buf[ADD_ENTROPY];
-
-	/* local variables */
 #ifdef WIN32
+#define TRY_SEED_WIN32
+static int
+arc4_seed_win32(void)
+{
+	/* This is adapted from Tor's crypto_seed_rng() */
 	static int provider_set = 0;
 	static HCRYPTPROV provider;
-#else
-	static const char *filenames[] = {
-		"/dev/srandom", "/dev/urandom", "/dev/random", NULL
-	};
-	int fd, i;
-	size_t n;
-#endif
+	unsigned char buf[ADD_ENTROPY];
 
-#ifdef WIN32
 	if (!provider_set) {
 		if (!CryptAcquireContext(&provider, NULL, NULL, PROV_RSA_FULL,
 		    CRYPT_VERIFYCONTEXT)) {
-			if ((unsigned long)GetLastError() != (unsigned long)NTE_BAD_KEYSET)
+			if (GetLastError() != (DWORD)NTE_BAD_KEYSET)
 				return -1;
 		}
 		provider_set = 1;
@@ -168,7 +163,144 @@ arc4_seed(void)
 	memset(buf, 0, sizeof(buf));
 	arc4_seeded_ok = 1;
 	return 0;
-#else
+}
+#endif
+
+#if defined(_EVENT_HAVE_SYS_SYSCTL_H)
+#if _EVENT_HAVE_DECL_CTL_KERN && _EVENT_HAVE_DECL_KERN_RANDOM && _EVENT_HAVE_DECL_RANDOM_UUID
+#define TRY_SEED_SYSCTL_LINUX
+static int
+arc4_seed_sysctl_linux(void)
+{
+	/* Based on code by William Ahern, this function tries to use the
+	 * RANDOM_UUID sysctl to get entropy from the kernel.  This can work
+	 * even if /dev/urandom is inaccessible for some reason (e.g., we're
+	 * running in a chroot). */
+	int mib[] = { CTL_KERN, KERN_RANDOM, RANDOM_UUID };
+	unsigned char buf[ADD_ENTROPY];
+	size_t len, n;
+	int i, any_set;
+
+	memset(buf, 0, sizeof(buf));
+
+	for (len = 0; len < sizeof(buf); len += n) {
+		n = sizeof(buf) - len;
+
+		if (0 != sysctl(mib, 3, &buf[len], &n, NULL, 0))
+			return -1;
+	}
+	/* make sure that the buffer actually got set. */
+	for (i=any_set=0; i<sizeof(buf); ++i) {
+		any_set |= buf[i];
+	}
+	if (!any_set)
+		return -1;
+
+	arc4_addrandom(buf, sizeof(buf));
+	memset(buf, 0, sizeof(buf));
+	arc4_seeded_ok = 1;
+	return 0;
+}
+#endif
+
+#if _EVENT_HAVE_DECL_CTL_KERN && _EVENT_HAVE_DECL_KERN_ARND
+#define TRY_SEED_SYSCTL_BSD
+static int
+arc4_seed_sysctl_bsd(void)
+{
+	/* Based on code from William Ahern and from OpenBSD, this function
+	 * tries to use the KERN_ARND syscall to get entropy from the kernel.
+	 * This can work even if /dev/urandom is inaccessible for some reason
+	 * (e.g., we're running in a chroot). */
+	int mib[] = { CTL_KERN, KERN_ARND };
+	unsigned char buf[ADD_ENTROPY];
+	size_t len, n;
+	int i, any_set;
+
+	memset(buf, 0, sizeof(buf));
+
+	len = sizeof(buf);
+	if (sysctl(mib, 2, buf, &len, NULL, 0) == -1) {
+		for (len = 0; len < sizeof(buf); len += sizeof(unsigned)) {
+			n = sizeof(unsigned);
+			if (n + len > sizeof(buf))
+			    n = len - sizeof(buf);
+			if (sysctl(mib, 2, &buf[len], &n, NULL, 0) == -1)
+				return -1;
+		}
+	}
+	/* make sure that the buffer actually got set. */
+	for (i=any_set=0; i<sizeof(buf); ++i) {
+		any_set |= buf[i];
+	}
+	if (!any_set)
+		return -1;
+
+	arc4_addrandom(buf, sizeof(buf));
+	memset(buf, 0, sizeof(buf));
+	arc4_seeded_ok = 1;
+	return 0;
+}
+#endif
+#endif /* defined(_EVENT_HAVE_SYS_SYSCTL_H) */
+
+#ifdef __linux__
+#define TRY_SEED_PROC_SYS_KERNEL_RANDOM_UUID
+static int
+arc4_seed_proc_sys_kernel_random_uuid(void)
+{
+	/* Occasionally, somebody will make /proc/sys accessible in a chroot,
+	 * but not /dev/urandom.  Let's try /proc/sys/kernel/random/uuid.
+	 * Its format is stupid, so we need to decode it from hex.
+	 */
+	int fd;
+	char buf[128];
+	unsigned char entropy[64];
+	int bytes, n, i, nybbles;
+	for (bytes = 0; bytes<ADD_ENTROPY; ) {
+		fd = open("/proc/sys/kernel/random/uuid", O_RDONLY, 0);
+		if (fd < 0)
+			return -1;
+		n = read(fd, buf, sizeof(buf));
+		close(fd);
+		if (n<=0)
+			return -1;
+		memset(entropy, 0, sizeof(entropy));
+		for (i=nybbles=0; i<n; ++i) {
+			if (EVUTIL_ISXDIGIT(buf[i])) {
+				int nyb = evutil_hex_char_to_int(buf[i]);
+				if (nybbles & 1) {
+					entropy[nybbles/2] |= nyb;
+				} else {
+					entropy[nybbles/2] |= nyb<<4;
+				}
+				++nybbles;
+			}
+		}
+		if (nybbles < 2)
+			return -1;
+		arc4_addrandom(entropy, nybbles/2);
+		bytes += nybbles/2;
+	}
+	memset(entropy, 0, sizeof(entropy));
+	memset(buf, 0, sizeof(buf));
+	return 0;
+}
+#endif
+
+#ifndef WIN32
+#define TRY_SEED_URANDOM
+static int
+arc4_seed_urandom(void)
+{
+	/* This is adapted from Tor's crypto_seed_rng() */
+	static const char *filenames[] = {
+		"/dev/srandom", "/dev/urandom", "/dev/random", NULL
+	};
+	unsigned char buf[ADD_ENTROPY];
+	int fd, i;
+	size_t n;
+
 	for (i = 0; filenames[i]; ++i) {
 		fd = open(filenames[i], O_RDONLY, 0);
 		if (fd<0)
@@ -184,7 +316,39 @@ arc4_seed(void)
 	}
 
 	return -1;
+}
 #endif
+
+static int
+arc4_seed(void)
+{
+	int ok = 0;
+	/* We try every method that might work, and don't give up even if one
+	 * does seem to work.  There's no real harm in over-seeding, and if
+	 * one of these sources turns out to be broken, that would be bad. */
+#ifdef TRY_SEED_WIN32
+	if (0 == arc4_seed_win32())
+		ok = 1;
+#endif
+#ifdef TRY_SEED_URANDOM
+	if (0 == arc4_seed_urandom())
+		ok = 1;
+#endif
+#ifdef TRY_SEED_PROC_SYS_KERNEL_RANDOM_UUID
+	if (0 == arc4_seed_proc_sys_kernel_random_uuid())
+		ok = 1;
+#endif
+#ifdef TRY_SEED_SYSCTL_LINUX
+	/* Apparently Linux is deprecating sysctl, and spewing warning
+	 * messages when you try to use it. */
+	if (!ok && 0 == arc4_seed_sysctl_linux())
+		ok = 1;
+#endif
+#ifdef TRY_SEED_SYSCTL_BSD
+	if (0 == arc4_seed_sysctl_bsd())
+		ok = 1;
+#endif
+	return ok ? 0 : -1;
 }
 
 static void

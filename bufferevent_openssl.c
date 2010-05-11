@@ -324,7 +324,7 @@ static int be_openssl_ctrl(struct bufferevent *, enum bufferevent_ctrl_op, union
 
 const struct bufferevent_ops bufferevent_ops_openssl = {
 	"ssl",
-	evutil_offsetof(struct bufferevent_openssl, bev),
+	evutil_offsetof(struct bufferevent_openssl, bev.bev),
 	be_openssl_enable,
 	be_openssl_disable,
 	be_openssl_destruct,
@@ -1030,8 +1030,13 @@ be_openssl_destruct(struct bufferevent *bev)
 
 	if (bev_ssl->bev.options & BEV_OPT_CLOSE_ON_FREE) {
 		if (bev_ssl->underlying) {
-			bufferevent_free(bev_ssl->underlying);
-			bev_ssl->underlying = NULL;
+			if (BEV_UPCAST(bev_ssl->underlying)->refcnt < 2) {
+				event_warnx("BEV_OPT_CLOSE_ON_FREE set on an "
+				    "bufferevent with too few references");
+			} else {
+				bufferevent_free(bev_ssl->underlying);
+				bev_ssl->underlying = NULL;
+			}
 		}
 		SSL_free(bev_ssl->ssl);
 	}
@@ -1202,7 +1207,9 @@ bufferevent_openssl_filter_new(struct event_base *base,
     enum bufferevent_ssl_state state,
     int options)
 {
-	int close_flag = options & BEV_OPT_CLOSE_ON_FREE;
+	/* We don't tell the BIO to close the bufferevent; we do it ourselves
+	 * on be_openssl_destruct */
+	int close_flag = 0; /* options & BEV_OPT_CLOSE_ON_FREE; */
 	BIO *bio;
 	if (!underlying)
 		return NULL;

@@ -364,7 +364,7 @@ http_basic_test(void)
 
 	/* connect to the second port */
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	fd = http_connect("127.0.0.1", port + 1);
 
@@ -383,7 +383,7 @@ http_basic_test(void)
 	event_dispatch();
 
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	evhttp_free(http);
 
@@ -495,7 +495,7 @@ static void
 http_bad_request_test(void)
 {
 	struct timeval tv;
-	struct bufferevent *bev;
+	struct bufferevent *bev = NULL;
 	evutil_socket_t fd;
 	const char *http_request;
 	short port = -1;
@@ -529,7 +529,7 @@ http_bad_request_test(void)
 	event_dispatch();
 
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	if (test_ok != 0) {
 		fprintf(stdout, "FAILED\n");
@@ -564,6 +564,8 @@ http_bad_request_test(void)
 
 end:
 	evhttp_free(http);
+	if (bev)
+		bufferevent_free(bev);
 }
 
 static struct evhttp_connection *delayed_client;
@@ -634,7 +636,7 @@ http_delete_test(void)
 	event_dispatch();
 
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	evhttp_free(http);
 
@@ -1461,7 +1463,7 @@ http_failure_test(void)
 	event_dispatch();
 
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	evhttp_free(http);
 
@@ -1655,22 +1657,16 @@ http_parse_query_test(void *ptr)
 }
 
 static void
-http_base_test(void)
+http_base_test(void *ptr)
 {
-	struct event_base *tmp;
+	struct event_base *base = NULL;
 	struct bufferevent *bev;
 	evutil_socket_t fd;
 	const char *http_request;
 	short port = -1;
 
+	test_ok = 0;
 	base = event_init();
-
-	/*
-	 * create another bogus base - which is being used by all subsequen
-	 * tests - yuck!
-	 */
-	tmp = event_init();
-
 	http = http_setup(&port, base);
 
 	fd = http_connect("127.0.0.1", port);
@@ -1691,14 +1687,15 @@ http_base_test(void)
 	event_base_dispatch(base);
 
 	bufferevent_free(bev);
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	evhttp_free(http);
 
-	event_base_free(base);
-	base = tmp;
+	tt_int_op(test_ok, ==, 2);
 
-	test_ok = (test_ok == 2);
+end:
+	if (base)
+		event_base_free(base);
 }
 
 /*
@@ -1774,7 +1771,7 @@ _http_incomplete_test(int use_timeout)
 
 	bufferevent_free(bev);
 	if (use_timeout) {
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 	}
 
 	evhttp_free(http);
@@ -2385,7 +2382,7 @@ http_multi_line_header_test(void)
 	if (bev)
 		bufferevent_free(bev);
 	if (fd >= 0)
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 	if (http)
 		evhttp_free(http);
 }
@@ -2530,7 +2527,7 @@ static void
 terminate_chunked_trickle_cb(evutil_socket_t fd, short events, void *arg)
 {
 	struct terminate_state *state = arg;
-	struct evbuffer *evb = evbuffer_new();
+	struct evbuffer *evb;
 	struct timeval tv;
 
 	if (evhttp_request_get_connection(state->req) == NULL) {
@@ -2540,6 +2537,7 @@ terminate_chunked_trickle_cb(evutil_socket_t fd, short events, void *arg)
 		return;
 	}
 
+	evb = evbuffer_new();
 	evbuffer_add_printf(evb, "%p", evb);
 	evhttp_send_reply_chunk(state->req, evb);
 	evbuffer_free(evb);
@@ -2581,7 +2579,7 @@ terminate_chunked_client(evutil_socket_t fd, short event, void *arg)
 {
 	struct terminate_state *state = arg;
 	bufferevent_free(state->bev);
-	EVUTIL_CLOSESOCKET(state->fd);
+	evutil_closesocket(state->fd);
 }
 
 static void
@@ -2636,7 +2634,7 @@ http_terminate_chunked_test(void)
 
  end:
 	if (fd >= 0)
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 	if (http)
 		evhttp_free(http);
 }
@@ -2647,7 +2645,7 @@ http_terminate_chunked_test(void)
 
 struct testcase_t http_testcases[] = {
 	{ "primitives", http_primitives, 0, NULL, NULL },
-	HTTP_LEGACY(base),
+	{ "base", http_base_test, TT_FORK|TT_NEED_BASE, NULL, NULL },
 	{ "bad_headers", http_bad_header_test, 0, NULL, NULL },
 	{ "parse_query", http_parse_query_test, 0, NULL, NULL },
 	HTTP_LEGACY(basic),

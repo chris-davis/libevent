@@ -185,12 +185,14 @@ _evsig_set_handler(struct event_base *base,
 	if (sigaction(evsignal, &sa, sig->sh_old[evsignal]) == -1) {
 		event_warn("sigaction");
 		mm_free(sig->sh_old[evsignal]);
+		sig->sh_old[evsignal] = NULL;
 		return (-1);
 	}
 #else
 	if ((sh = signal(evsignal, handler)) == SIG_ERR) {
 		event_warn("signal");
 		mm_free(sig->sh_old[evsignal]);
+		sig->sh_old[evsignal] = NULL;
 		return (-1);
 	}
 	*sig->sh_old[evsignal] = sh;
@@ -327,11 +329,11 @@ evsig_dealloc(struct event_base *base)
 	}
 
 	if (base->sig.ev_signal_pair[0] != -1) {
-		EVUTIL_CLOSESOCKET(base->sig.ev_signal_pair[0]);
+		evutil_closesocket(base->sig.ev_signal_pair[0]);
 		base->sig.ev_signal_pair[0] = -1;
 	}
 	if (base->sig.ev_signal_pair[1] != -1) {
-		EVUTIL_CLOSESOCKET(base->sig.ev_signal_pair[1]);
+		evutil_closesocket(base->sig.ev_signal_pair[1]);
 		base->sig.ev_signal_pair[1] = -1;
 	}
 	base->sig.sh_old_max = 0;

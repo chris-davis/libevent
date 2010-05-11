@@ -51,7 +51,7 @@ write_cb(evutil_socket_t fd, short event, void *arg)
 	if (len > 0) {
 		if (!called)
 			event_add(arg, NULL);
-		EVUTIL_CLOSESOCKET(pair[0]);
+		evutil_closesocket(pair[0]);
 	} else if (called == 1)
 		test_okay = 0;
 
@@ -62,6 +62,16 @@ int
 main(int argc, char **argv)
 {
 	struct event ev;
+
+#ifdef WIN32
+	WORD wVersionRequested;
+	WSADATA wsaData;
+	int	err;
+
+	wVersionRequested = MAKEWORD(2, 2);
+
+	err = WSAStartup(wVersionRequested, &wsaData);
+#endif
 
 #ifndef WIN32
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)

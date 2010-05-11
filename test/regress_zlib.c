@@ -275,10 +275,10 @@ test_bufferevent_zlib(void *arg)
 	r = inflateInit(&z_input);
 
 	/* initialize filters */
-	bev1 = bufferevent_filter_new(bev1, NULL, zlib_output_filter, 0,
-	    zlib_deflate_free, &z_output);
+	bev1 = bufferevent_filter_new(bev1, NULL, zlib_output_filter,
+	    BEV_OPT_CLOSE_ON_FREE, zlib_deflate_free, &z_output);
 	bev2 = bufferevent_filter_new(bev2, zlib_input_filter,
-	    NULL, 0, zlib_inflate_free, &z_input);
+	    NULL, BEV_OPT_CLOSE_ON_FREE, zlib_inflate_free, &z_input);
 	bufferevent_setcb(bev1, readcb, writecb, errorcb, NULL);
 	bufferevent_setcb(bev2, readcb, writecb, errorcb, NULL);
 
@@ -313,7 +313,7 @@ end:
 		bufferevent_free(bev2);
 
 	if (pair[0] >= 0)
-		EVUTIL_CLOSESOCKET(pair[0]);
+		evutil_closesocket(pair[0]);
 	if (pair[1] >= 0)
-		EVUTIL_CLOSESOCKET(pair[1]);
+		evutil_closesocket(pair[1]);
 }

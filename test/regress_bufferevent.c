@@ -345,10 +345,10 @@ test_bufferevent_filters_impl(int use_pair)
 		buffer[i] = i;
 
 	bev1 = bufferevent_filter_new(bev1, NULL, bufferevent_output_filter,
-				      0, NULL, NULL);
+				      BEV_OPT_CLOSE_ON_FREE, NULL, NULL);
 
 	bev2 = bufferevent_filter_new(bev2, bufferevent_input_filter,
-				      NULL, 0, NULL, NULL);
+				      NULL, BEV_OPT_CLOSE_ON_FREE, NULL, NULL);
 	bufferevent_setcb(bev1, NULL, writecb, errorcb, NULL);
 	bufferevent_setcb(bev2, readcb, NULL, errorcb, NULL);
 
@@ -541,7 +541,7 @@ close_socket_cb(evutil_socket_t fd, short what, void *arg)
 {
 	evutil_socket_t *fdp = arg;
 	if (*fdp >= 0) {
-		EVUTIL_CLOSESOCKET(*fdp);
+		evutil_closesocket(*fdp);
 		*fdp = -1;
 	}
 }
@@ -603,7 +603,7 @@ test_bufferevent_connect_fail(void *arg)
 
 end:
 	if (fake_listener >= 0)
-		EVUTIL_CLOSESOCKET(fake_listener);
+		evutil_closesocket(fake_listener);
 
 	if (bev)
 		bufferevent_free(bev);
@@ -682,7 +682,7 @@ test_bufferevent_timeouts(void *arg)
 		struct bufferevent *bevf1, *bevf2;
 		bevf1 = bufferevent_filter_new(bev1, NULL, NULL,
 		    BEV_OPT_CLOSE_ON_FREE, NULL, NULL);
-		bevf2 = bufferevent_filter_new(bev1, NULL, NULL,
+		bevf2 = bufferevent_filter_new(bev2, NULL, NULL,
 		    BEV_OPT_CLOSE_ON_FREE, NULL, NULL);
 		tt_assert(bevf1);
 		tt_assert(bevf2);

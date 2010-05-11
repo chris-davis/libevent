@@ -148,6 +148,7 @@ evbuffer_overlapped_new(evutil_socket_t fd)
 
 	TAILQ_INIT(&evo->buffer.callbacks);
 	evo->buffer.refcnt = 1;
+	evo->buffer.last_with_datap = &evo->buffer.first;
 
 	evo->buffer.is_overlapped = 1;
 	evo->fd = fd;
@@ -233,7 +234,7 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	int r = -1, i;
 	int nvecs;
 	int npin=0;
-	struct evbuffer_chain *chain=NULL;
+	struct evbuffer_chain *chain=NULL, **chainp;
 	DWORD bytesRead;
 	DWORD flags = 0;
 	struct evbuffer_iovec vecs[MAX_WSABUFS];
@@ -249,12 +250,15 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	buf_o->n_buffers = 0;
 	memset(buf_o->buffers, 0, sizeof(buf_o->buffers));
 
-	if (_evbuffer_expand_fast(buf, at_most) == -1)
+	if (_evbuffer_expand_fast(buf, at_most, 2) == -1)
 		goto done;
 	evbuffer_freeze(buf, 0);
 
+	/* XXX This and evbuffer_read_setup_vecs() should say MAX_WSABUFS,
+	 * not "2".  But commit_read() above can't handle more than two
+	 * buffers yet. */
 	nvecs = _evbuffer_read_setup_vecs(buf, at_most,
-	    vecs, &chain, 1);
+	    vecs, 2, &chainp, 1);
 	for (i=0;i<nvecs;++i) {
 		WSABUF_FROM_EVBUFFER_IOV(
 			&buf_o->buffers[i],
@@ -262,7 +266,7 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	}
 
 	buf_o->n_buffers = nvecs;
-	buf_o->first_pinned = chain;
+	buf_o->first_pinned = chain= *chainp;
 	npin=0;
 	for ( ; chain; chain = chain->next) {
 		_evbuffer_chain_pin(chain, EVBUFFER_MEM_PINNED_R);

@@ -45,8 +45,15 @@ extern "C" {
 #include <winsock2.h>
 #endif
 #include <sys/queue.h>
-/* minimum allocation for a chain. */
-#define MIN_BUFFER_SIZE	256
+
+/* Minimum allocation for a chain.  We define this so that we're burning no
+ * more than 5% of each allocation on overhead.  It would be nice to lose even
+ * less space, though. */
+#if _EVENT_SIZEOF_VOID_P < 8
+#define MIN_BUFFER_SIZE	512
+#else
+#define MIN_BUFFER_SIZE	1024
+#endif
 
 /** A single evbuffer callback for an evbuffer. This function will be invoked
  * when bytes are added to or removed from the evbuffer. */
@@ -73,16 +80,21 @@ struct evbuffer {
 	struct evbuffer_chain *first;
 	/** The last chain in this buffer's linked list of chains. */
 	struct evbuffer_chain *last;
-	/** The next-to-last chain in this buffer's linked list of chains.
-	 * NULL if the buffer has 0 or 1 chains.  Used in case there's an
-	 * ongoing read that needs to be split across multiple chains: we want
-	 * to add a new chain as a read target, but we don't want to lose our
-	 * pointer to the next-to-last chain if the read turns out to be
-	 * incomplete.
+
+	/** Pointer to the next pointer pointing at the 'last_with_data' chain.
+	 *
+	 * To unpack:
+	 *
+	 * The last_with_data chain is the last chain that has any data in it.
+	 * If all chains in the buffer are empty, it is the first chain.
+	 * If the buffer has no chains, it is NULL.
+	 *
+	 * The last_with_datap pointer points at _whatever 'next' pointer_
+	 * points at the last_with_datap chain.  If the last_with_data chain
+	 * is the first chain, or it is NULL, then the last_with_datap pointer
+	 * is &buf->first.
 	 */
-	/* FIXME: This should probably be called last_with_space and
-	 * repurposed accordingly. */
-	struct evbuffer_chain *previous_to_last;
+	struct evbuffer_chain **last_with_datap;
 
 	/** Total amount of bytes stored in all chains.*/
 	size_t total_len;
@@ -234,8 +246,8 @@ void _evbuffer_chain_unpin(struct evbuffer_chain *chain, unsigned flag);
 void _evbuffer_decref_and_unlock(struct evbuffer *buffer);
 
 /** As evbuffer_expand, but does not guarantee that the newly allocated memory
- * is contiguous.  Instead, it may be split across two chunks. */
-int _evbuffer_expand_fast(struct evbuffer *, size_t);
+ * is contiguous.  Instead, it may be split across two or more chunks. */
+int _evbuffer_expand_fast(struct evbuffer *, size_t, int);
 
 /** Helper: prepares for a readv/WSARecv call by expanding the buffer to
  * hold enough memory to read 'howmuch' bytes in possibly noncontiguous memory.
@@ -244,7 +256,7 @@ int _evbuffer_expand_fast(struct evbuffer *, size_t);
  * Returns the number of vecs used.
  */
 int _evbuffer_read_setup_vecs(struct evbuffer *buf, ev_ssize_t howmuch,
-    struct evbuffer_iovec *vecs, struct evbuffer_chain **chainp, int exact);
+    struct evbuffer_iovec *vecs, int n_vecs, struct evbuffer_chain ***chainp, int exact);
 
 /* Helper macro: copies an evbuffer_iovec in ei to a win32 WSABUF in i. */
 #define WSABUF_FROM_EVBUFFER_IOV(i,ei) do {		\

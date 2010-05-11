@@ -339,7 +339,7 @@ evrpc_request_cb_closure(void *arg, enum EVRPC_HOOK_RESULT hook_res)
 		goto error;
 
 	/* let's check that we can parse the request */
-	rpc_state->request = rpc->request_new();
+	rpc_state->request = rpc->request_new(rpc->request_new_arg);
 	if (rpc_state->request == NULL)
 		goto error;
 
@@ -351,7 +351,7 @@ evrpc_request_cb_closure(void *arg, enum EVRPC_HOOK_RESULT hook_res)
 
 	/* at this point, we have a well formed request, prepare the reply */
 
-	rpc_state->reply = rpc->reply_new();
+	rpc_state->reply = rpc->reply_new(rpc->reply_new_arg);
 	if (rpc_state->reply == NULL)
 		goto error;
 
@@ -442,6 +442,18 @@ error:
 		evrpc_reqstate_free(rpc_state);
 	evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Error");
 	return;
+}
+
+void *
+evrpc_get_request(struct evrpc_req_generic *req)
+{
+	return req->request;
+}
+
+void *
+evrpc_get_reply(struct evrpc_req_generic *req)
+{
+	return req->reply;
 }
 
 static void
@@ -762,6 +774,7 @@ evrpc_resume_request(void *vbase, void *ctx, enum EVRPC_HOOK_RESULT res)
 
 	(*pause->cb)(pause->ctx, res);
 	TAILQ_REMOVE(head, pause, next);
+	mm_free(pause);
 	return (0);
 }
 
@@ -1069,9 +1082,9 @@ error:
 /** Takes a request object and fills it in with the right magic */
 static struct evrpc *
 evrpc_register_object(const char *name,
-    void *(*req_new)(void), void (*req_free)(void *),
+    void *(*req_new)(void*), void *req_new_arg, void (*req_free)(void *),
     int (*req_unmarshal)(void *, struct evbuffer *),
-    void *(*rpl_new)(void), void (*rpl_free)(void *),
+    void *(*rpl_new)(void*), void *rpl_new_arg, void (*rpl_free)(void *),
     int (*rpl_complete)(void *),
     void (*rpl_marshal)(struct evbuffer *, void *))
 {
@@ -1084,9 +1097,11 @@ evrpc_register_object(const char *name,
 		return (NULL);
 	}
 	rpc->request_new = req_new;
+	rpc->request_new_arg = req_new_arg;
 	rpc->request_free = req_free;
 	rpc->request_unmarshal = req_unmarshal;
 	rpc->reply_new = rpl_new;
+	rpc->reply_new_arg = rpl_new_arg;
 	rpc->reply_free = rpl_free;
 	rpc->reply_complete = rpl_complete;
 	rpc->reply_marshal = rpl_marshal;
@@ -1096,15 +1111,15 @@ evrpc_register_object(const char *name,
 int
 evrpc_register_generic(struct evrpc_base *base, const char *name,
     void (*callback)(struct evrpc_req_generic *, void *), void *cbarg,
-    void *(*req_new)(void), void (*req_free)(void *),
+    void *(*req_new)(void *), void *req_new_arg, void (*req_free)(void *),
     int (*req_unmarshal)(void *, struct evbuffer *),
-    void *(*rpl_new)(void), void (*rpl_free)(void *),
+    void *(*rpl_new)(void *), void *rpl_new_arg, void (*rpl_free)(void *),
     int (*rpl_complete)(void *),
     void (*rpl_marshal)(struct evbuffer *, void *))
 {
 	struct evrpc* rpc =
-	    evrpc_register_object(name, req_new, req_free, req_unmarshal,
-		rpl_new, rpl_free, rpl_complete, rpl_marshal);
+	    evrpc_register_object(name, req_new, req_new_arg, req_free, req_unmarshal,
+		rpl_new, rpl_new_arg, rpl_free, rpl_complete, rpl_marshal);
 	if (rpc == NULL)
 		return (-1);
 	evrpc_register_rpc(base, rpc,

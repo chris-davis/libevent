@@ -66,30 +66,51 @@
 static int
 _evbuffer_validate(struct evbuffer *buf)
 {
-	struct evbuffer_chain *chain, *previous = NULL;
+	struct evbuffer_chain *chain;
 	size_t sum = 0;
+	int found_last_with_datap = 0;
 
 	if (buf->first == NULL) {
 		tt_assert(buf->last == NULL);
-		tt_assert(buf->previous_to_last == NULL);
 		tt_assert(buf->total_len == 0);
 	}
 
-	if (buf->previous_to_last == NULL) {
-		tt_assert(buf->first == buf->last);
-	}
-
 	chain = buf->first;
+
+	tt_assert(buf->last_with_datap);
+	if (buf->last_with_datap == &buf->first)
+		found_last_with_datap = 1;
+
 	while (chain != NULL) {
+		if (&chain->next == buf->last_with_datap)
+			found_last_with_datap = 1;
 		sum += chain->off;
 		if (chain->next == NULL) {
-			tt_assert(buf->previous_to_last == previous);
 			tt_assert(buf->last == chain);
 		}
 		tt_assert(chain->buffer_len >= chain->misalign + chain->off);
-		previous = chain;
 		chain = chain->next;
 	}
+
+	if (buf->first)
+		tt_assert(*buf->last_with_datap);
+
+	if (*buf->last_with_datap) {
+		chain = *buf->last_with_datap;
+		if (chain->off == 0 || buf->total_len == 0) {
+			tt_assert(chain->off == 0)
+			tt_assert(chain == buf->first);
+			tt_assert(buf->total_len == 0);
+		}
+		chain = chain->next;
+		while (chain != NULL) {
+			tt_assert(chain->off == 0);
+			chain = chain->next;
+		}
+	} else {
+		tt_assert(buf->last_with_datap == &buf->first);
+	}
+	tt_assert(found_last_with_datap);
 
 	tt_assert(sum == buf->total_len);
 	return 1;
@@ -97,8 +118,52 @@ _evbuffer_validate(struct evbuffer *buf)
 	return 0;
 }
 
+static void
+evbuffer_get_waste(struct evbuffer *buf, size_t *allocatedp, size_t *wastedp, size_t *usedp)
+{
+	struct evbuffer_chain *chain;
+	size_t a, w, u;
+	int n = 0;
+	u = a = w = 0;
+
+	chain = buf->first;
+	/* skip empty at start */
+	while (chain && chain->off==0) {
+		++n;
+		a += chain->buffer_len;
+		chain = chain->next;
+	}
+	/* first nonempty chain: stuff at the end only is wasted. */
+	if (chain) {
+		++n;
+		a += chain->buffer_len;
+		u += chain->off;
+		if (chain->next && chain->next->off)
+			w += chain->buffer_len - (chain->misalign + chain->off);
+		chain = chain->next;
+	}
+	/* subsequent nonempty chains */
+	while (chain && chain->off) {
+		++n;
+		a += chain->buffer_len;
+		w += chain->misalign;
+		u += chain->off;
+		if (chain->next && chain->next->off)
+			w += chain->buffer_len - (chain->misalign + chain->off);
+		chain = chain->next;
+	}
+	/* subsequent empty chains */
+	while (chain) {
+		++n;
+		a += chain->buffer_len;
+	}
+	*allocatedp = a;
+	*wastedp = w;
+	*usedp = u;
+}
+
 #define evbuffer_validate(buf)			\
-	TT_STMT_BEGIN if (!_evbuffer_validate(buf)) goto end; TT_STMT_END
+	TT_STMT_BEGIN if (!_evbuffer_validate(buf)) TT_DIE(("Buffer format invalid")); TT_STMT_END
 
 static void
 test_evbuffer(void *ptr)
@@ -239,8 +304,10 @@ test_evbuffer_reserve2(void *ptr)
 	cp = v[0].iov_base;
 	remaining = v[0].iov_len - 512;
 	v[0].iov_len = 512;
+	evbuffer_validate(buf);
 	tt_int_op(0, ==, evbuffer_commit_space(buf, v, 1));
 	tt_int_op(evbuffer_get_length(buf), ==, 512);
+	evbuffer_validate(buf);
 
 	/* Ask for another same-chunk request, in an existing chunk. Use 8
 	 * bytes of it. */
@@ -253,6 +320,7 @@ test_evbuffer_reserve2(void *ptr)
 	tt_int_op(0, ==, evbuffer_commit_space(buf, v, 1));
 	tt_int_op(evbuffer_get_length(buf), ==, 520);
 	remaining -= 8;
+	evbuffer_validate(buf);
 
 	/* Now ask for a request that will be split. Use only one byte of it,
 	   though. */
@@ -268,10 +336,12 @@ test_evbuffer_reserve2(void *ptr)
 	tt_int_op(0, ==, evbuffer_commit_space(buf, v, 1));
 	tt_int_op(evbuffer_get_length(buf), ==, 521);
 	remaining -= 1;
+	evbuffer_validate(buf);
 
 	/* Now ask for a request that will be split. Use some of the first
 	 * part and some of the second. */
 	n = evbuffer_reserve_space(buf, remaining+64, v, 2);
+	evbuffer_validate(buf);
 	tt_int_op(n, ==, 2);
 	tt_assert(cp + 521 == v[0].iov_base);
 	tt_int_op(remaining, ==, v[0].iov_len);
@@ -283,7 +353,7 @@ test_evbuffer_reserve2(void *ptr)
 	v[1].iov_len = 60;
 	tt_int_op(0, ==, evbuffer_commit_space(buf, v, 2));
 	tt_int_op(evbuffer_get_length(buf), ==, 981);
-
+	evbuffer_validate(buf);
 
 	/* Now peek to make sure stuff got made how we like. */
 	memset(v,0,sizeof(v));
@@ -309,6 +379,154 @@ test_evbuffer_reserve2(void *ptr)
 end:
 	evbuffer_free(buf);
 }
+
+static void
+test_evbuffer_reserve_many(void *ptr)
+{
+	/* This is a glass-box test to handle expanding a buffer with more
+	 * chunks and reallocating chunks as needed */
+	struct evbuffer *buf = evbuffer_new();
+	struct evbuffer_iovec v[8];
+	int n;
+	size_t sz;
+	int add_data = ptr && !strcmp(ptr, "add");
+	int fill_first = ptr && !strcmp(ptr, "fill");
+	char *cp1, *cp2;
+
+	/* When reserving the the first chunk, we just allocate it */
+	n = evbuffer_reserve_space(buf, 128, v, 2);
+	evbuffer_validate(buf);
+	tt_int_op(n, ==, 1);
+	tt_assert(v[0].iov_len >= 128);
+	sz = v[0].iov_len;
+	cp1 = v[0].iov_base;
+	if (add_data) {
+		*(char*)v[0].iov_base = 'X';
+		v[0].iov_len = 1;
+		n = evbuffer_commit_space(buf, v, 1);
+		tt_int_op(n, ==, 0);
+	} else if (fill_first) {
+		memset(v[0].iov_base, 'X', v[0].iov_len);
+		n = evbuffer_commit_space(buf, v, 1);
+		tt_int_op(n, ==, 0);
+		n = evbuffer_reserve_space(buf, 128, v, 2);
+		tt_int_op(n, ==, 1);
+		sz = v[0].iov_len;
+		tt_assert(v[0].iov_base != cp1);
+		cp1 = v[0].iov_base;
+	}
+
+	/* Make another chunk get added. */
+	n = evbuffer_reserve_space(buf, sz+128, v, 2);
+	evbuffer_validate(buf);
+	tt_int_op(n, ==, 2);
+	sz = v[0].iov_len + v[1].iov_len;
+	tt_int_op(sz, >=, v[0].iov_len+128);
+	if (add_data) {
+		tt_assert(v[0].iov_base == cp1 + 1);
+	} else {
+		tt_assert(v[0].iov_base == cp1);
+	}
+	cp1 = v[0].iov_base;
+	cp2 = v[1].iov_base;
+
+	/* And a third chunk. */
+	n = evbuffer_reserve_space(buf, sz+128, v, 3);
+	evbuffer_validate(buf);
+	tt_int_op(n, ==, 3);
+	tt_assert(cp1 == v[0].iov_base);
+	tt_assert(cp2 == v[1].iov_base);
+	sz = v[0].iov_len + v[1].iov_len + v[2].iov_len;
+
+	/* Now force a reallocation by asking for more space in only 2
+	 * buffers. */
+	n = evbuffer_reserve_space(buf, sz+128, v, 2);
+	evbuffer_validate(buf);
+	if (add_data) {
+		tt_int_op(n, ==, 2);
+		tt_assert(cp1 == v[0].iov_base);
+	} else {
+		tt_int_op(n, ==, 1);
+	}
+
+end:
+	evbuffer_free(buf);
+}
+
+static void
+test_evbuffer_expand(void *ptr)
+{
+	char data[4096];
+	struct evbuffer *buf;
+	size_t a,w,u;
+	void *buffer;
+
+	memset(data, 'X', sizeof(data));
+
+	/* Make sure that expand() works on an empty buffer */
+	buf = evbuffer_new();
+	tt_int_op(evbuffer_expand(buf, 20000), ==, 0);
+	evbuffer_validate(buf);
+	a=w=u=0;
+	evbuffer_get_waste(buf, &a,&w,&u);
+	tt_assert(w == 0);
+	tt_assert(u == 0);
+	tt_assert(a >= 20000);
+	tt_assert(buf->first);
+	tt_assert(buf->first == buf->last);
+	tt_assert(buf->first->off == 0);
+	tt_assert(buf->first->buffer_len >= 20000);
+
+	/* Make sure that expand() works as a no-op when there's enough
+	 * contiguous space already. */
+	buffer = buf->first->buffer;
+	evbuffer_add(buf, data, 1024);
+	tt_int_op(evbuffer_expand(buf, 1024), ==, 0);
+	tt_assert(buf->first->buffer == buffer);
+	evbuffer_validate(buf);
+	evbuffer_free(buf);
+
+	/* Make sure that expand() can work by moving misaligned data
+	 * when it makes sense to do so. */
+	buf = evbuffer_new();
+	evbuffer_add(buf, data, 400);
+	{
+		int n = buf->first->buffer_len - buf->first->off - 1;
+		tt_assert(n < sizeof(data));
+		evbuffer_add(buf, data, n);
+	}
+	tt_assert(buf->first == buf->last);
+	tt_assert(buf->first->off == buf->first->buffer_len - 1);
+	evbuffer_drain(buf, buf->first->off - 1);
+	tt_assert(1 == evbuffer_get_length(buf));
+	tt_assert(buf->first->misalign > 0);
+	tt_assert(buf->first->off == 1);
+	buffer = buf->first->buffer;
+	tt_assert(evbuffer_expand(buf, 40) == 0);
+	tt_assert(buf->first == buf->last);
+	tt_assert(buf->first->off == 1);
+	tt_assert(buf->first->buffer == buffer);
+	tt_assert(buf->first->misalign == 0);
+	evbuffer_validate(buf);
+	evbuffer_free(buf);
+
+	/* add, expand, pull-up: This used to crash libevent. */
+	buf = evbuffer_new();
+
+	evbuffer_add(buf, data, sizeof(data));
+	evbuffer_add(buf, data, sizeof(data));
+	evbuffer_add(buf, data, sizeof(data));
+
+	evbuffer_validate(buf);
+	evbuffer_expand(buf, 1024);
+	evbuffer_validate(buf);
+	evbuffer_pullup(buf, -1);
+	evbuffer_validate(buf);
+
+end:
+	evbuffer_free(buf);
+}
+
 
 static int reference_cb_called;
 static void
@@ -358,48 +576,81 @@ test_evbuffer_reference(void *ptr)
 
 	tt_assert(!memcmp(evbuffer_pullup(dst, strlen(data)),
 			  data, strlen(data)));
+	evbuffer_validate(dst);
 
  end:
 	evbuffer_free(dst);
 	evbuffer_free(src);
 }
 
-#ifndef WIN32
+int _evbuffer_testing_use_sendfile(void);
+int _evbuffer_testing_use_mmap(void);
+int _evbuffer_testing_use_linear_file_access(void);
+
 static void
 test_evbuffer_add_file(void *ptr)
 {
+	const char *impl = ptr;
 	struct evbuffer *src = evbuffer_new();
 	const char *data = "this is what we add as file system data.";
+	size_t datalen;
 	const char *compare;
 	evutil_socket_t fd, pair[2];
+	int r=0, n_written=0;
+
+	/* Add a test for a big file. XXXX */
+
+	tt_assert(impl);
+	if (!strcmp(impl, "sendfile")) {
+		if (!_evbuffer_testing_use_sendfile())
+			tt_skip();
+		TT_BLATHER(("Using sendfile-based implementaion"));
+	} else if (!strcmp(impl, "mmap")) {
+		if (!_evbuffer_testing_use_mmap())
+			tt_skip();
+		TT_BLATHER(("Using mmap-based implementaion"));
+	} else if (!strcmp(impl, "linear")) {
+		if (!_evbuffer_testing_use_linear_file_access())
+			tt_skip();
+		TT_BLATHER(("Using read-based implementaion"));
+	} else {
+		TT_DIE(("Didn't recognize the implementation"));
+	}
 
 	if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1)
 		tt_abort_msg("socketpair failed");
 
-	fd = regress_make_tmpfile(data, strlen(data));
+	datalen = strlen(data);
+	fd = regress_make_tmpfile(data, datalen);
 
 	tt_assert(fd != -1);
 
-	tt_assert(evbuffer_add_file(src, fd, 0, strlen(data)) != -1);
+	tt_assert(evbuffer_add_file(src, fd, 0, datalen) != -1);
 
 	evbuffer_validate(src);
 
-	while (evbuffer_write(src, pair[0]) > 0) {
+	while (evbuffer_get_length(src) &&
+	    (r = evbuffer_write(src, pair[0])) > 0) {
 		evbuffer_validate(src);
+		n_written += r;
 	}
+	tt_int_op(r, !=, -1);
+	tt_int_op(n_written, ==, datalen);
 
-	tt_assert(evbuffer_read(src, pair[1], strlen(data)) == strlen(data));
-	compare = (char *)evbuffer_pullup(src, strlen(data));
+	evbuffer_validate(src);
+	tt_assert(evbuffer_read(src, pair[1], strlen(data)) == datalen);
+	evbuffer_validate(src);
+	compare = (char *)evbuffer_pullup(src, datalen);
 	tt_assert(compare != NULL);
-	if (memcmp(compare, data, strlen(data)))
+	if (memcmp(compare, data, datalen))
 		tt_abort_msg("Data from add_file differs.");
 
+	evbuffer_validate(src);
  end:
-	EVUTIL_CLOSESOCKET(pair[0]);
-	EVUTIL_CLOSESOCKET(pair[1]);
+	evutil_closesocket(pair[0]);
+	evutil_closesocket(pair[1]);
 	evbuffer_free(src);
 }
-#endif
 
 #ifndef _EVENT_DISABLE_MM_REPLACEMENT
 static void *
@@ -632,23 +883,40 @@ test_evbuffer_iterative(void *ptr)
 {
 	struct evbuffer *buf = evbuffer_new();
 	const char *abc = "abcdefghijklmnopqrstvuwxyzabcdefghijklmnopqrstvuwxyzabcdefghijklmnopqrstvuwxyzabcdefghijklmnopqrstvuwxyz";
-	unsigned i, j, sum;
+	unsigned i, j, sum, n;
 
 	sum = 0;
+	n = 0;
 	for (i = 0; i < 1000; ++i) {
 		for (j = 1; j < strlen(abc); ++j) {
 			char format[32];
-
 			evutil_snprintf(format, sizeof(format), "%%%u.%us", j, j);
 			evbuffer_add_printf(buf, format, abc);
-			evbuffer_validate(buf);
+
+			/* Only check for rep violations every so often.
+			   Walking over the whole list of chains can get
+			   pretty expensive as it gets long.
+			 */
+			if ((n % 337) == 0)
+				evbuffer_validate(buf);
 
 			sum += j;
+			n++;
 		}
 	}
+	evbuffer_validate(buf);
 
 	tt_uint_op(sum, ==, evbuffer_get_length(buf));
 
+	{
+		size_t a,w,u;
+		a=w=u=0;
+		evbuffer_get_waste(buf, &a, &w, &u);
+		if (0)
+			printf("Allocated: %u.\nWasted: %u.\nUsed: %u.",
+			    (unsigned)a, (unsigned)w, (unsigned)u);
+		tt_assert( ((double)w)/a < .125);
+	}
  end:
 	evbuffer_free(buf);
 
@@ -711,6 +979,7 @@ test_evbuffer_ptr_set(void *ptr)
 	v[0].iov_len = 5000;
 	memset(v[0].iov_base, 1, v[0].iov_len);
 	evbuffer_commit_space(buf, v, 1);
+	evbuffer_validate(buf);
 
 	evbuffer_reserve_space(buf, 4000, v, 1);
 	v[0].iov_len = 4000;
@@ -721,6 +990,7 @@ test_evbuffer_ptr_set(void *ptr)
 	v[0].iov_len = 3000;
 	memset(v[0].iov_base, 3, v[0].iov_len);
 	evbuffer_commit_space(buf, v, 1);
+	evbuffer_validate(buf);
 
 	tt_int_op(evbuffer_get_length(buf), ==, 12000);
 
@@ -837,16 +1107,20 @@ test_evbuffer_callbacks(void *ptr)
 	 * adds a summary of length changes to buf_out1/buf_out2 when called. */
 	/* size: 0-> 36. */
 	evbuffer_add_printf(buf, "The %d magic words are spotty pudding", 2);
+	evbuffer_validate(buf);
 	evbuffer_cb_clear_flags(buf, cb2, EVBUFFER_CB_ENABLED);
 	evbuffer_drain(buf, 10); /*36->26*/
+	evbuffer_validate(buf);
 	evbuffer_prepend(buf, "Hello", 5);/*26->31*/
 	evbuffer_cb_set_flags(buf, cb2, EVBUFFER_CB_ENABLED);
 	evbuffer_add_reference(buf, "Goodbye", 7, NULL, NULL); /*31->38*/
 	evbuffer_remove_cb_entry(buf, cb1);
+	evbuffer_validate(buf);
 	evbuffer_drain(buf, evbuffer_get_length(buf)); /*38->0*/;
 	tt_assert(-1 == evbuffer_remove_cb(buf, log_change_callback, NULL));
 	evbuffer_add(buf, "X", 1); /* 0->1 */
 	tt_assert(!evbuffer_remove_cb(buf, log_change_callback, buf_out2));
+	evbuffer_validate(buf);
 
 	tt_str_op(evbuffer_pullup(buf_out1, -1), ==,
 		  "0->36; 36->26; 26->31; 31->38; ");
@@ -854,7 +1128,6 @@ test_evbuffer_callbacks(void *ptr)
 		  "0->36; 31->38; 38->0; 0->1; ");
 	evbuffer_drain(buf_out1, evbuffer_get_length(buf_out1));
 	evbuffer_drain(buf_out2, evbuffer_get_length(buf_out2));
-
 	/* Let's test the obsolete buffer_setcb function too. */
 	cb1 = evbuffer_add_cb(buf, log_change_callback, buf_out1);
 	cb2 = evbuffer_add_cb(buf, log_change_callback, buf_out2);
@@ -866,9 +1139,9 @@ test_evbuffer_callbacks(void *ptr)
 	evbuffer_setcb(buf, NULL, NULL);
 	evbuffer_add_printf(buf, "This will not.");
 	tt_str_op(evbuffer_pullup(buf, -1), ==, "This will not.");
-
+	evbuffer_validate(buf);
 	evbuffer_drain(buf, evbuffer_get_length(buf));
-
+	evbuffer_validate(buf);
 #if 0
 	/* Now let's try a suspended callback. */
 	cb1 = evbuffer_add_cb(buf, log_change_callback, buf_out1);
@@ -938,6 +1211,7 @@ test_evbuffer_add_reference(void *ptr)
 	/* Make sure that prepending does not meddle with immutable data */
 	tt_int_op(evbuffer_prepend(buf1, "I have ", 7), ==, 0);
 	tt_int_op(memcmp(chunk1, "If you", 6), ==, 0);
+	evbuffer_validate(buf1);
 
 	/* Make sure that when the chunk is over, the callback is invoked. */
 	evbuffer_drain(buf1, 7); /* Remove prepended stuff. */
@@ -949,6 +1223,7 @@ test_evbuffer_add_reference(void *ptr)
 	tt_assert(ref_done_cb_called_with_data == chunk1);
 	tt_assert(ref_done_cb_called_with_len == len1);
 	tt_int_op(ref_done_cb_called_count, ==, 1);
+	evbuffer_validate(buf1);
 
 	/* Drain some of the remaining chunk, then add it to another buffer */
 	evbuffer_drain(buf1, 6); /* Remove the ", you ". */
@@ -964,6 +1239,7 @@ test_evbuffer_add_reference(void *ptr)
 	evbuffer_drain(buf2, evbuffer_get_length(buf2));
 	tt_int_op(ref_done_cb_called_count, ==, 2);
 	tt_assert(ref_done_cb_called_with == (void*)222);
+	evbuffer_validate(buf2);
 
 	/* Now add more stuff to buf1 and make sure that it gets removed on
 	 * free. */
@@ -994,7 +1270,9 @@ test_evbuffer_prepend(void *ptr)
 	buf1 = evbuffer_new();
 	tt_assert(buf1);
 
-	evbuffer_add(buf1, "This string has 29 characters", 29);
+	/* Case 0: The evbuffer is entirely empty. */
+	evbuffer_prepend(buf1, "This string has 29 characters", 29);
+	evbuffer_validate(buf1);
 
 	/* Case 1: Prepend goes entirely in new chunk. */
 	evbuffer_prepend(buf1, "Short.", 6);
@@ -1027,6 +1305,7 @@ test_evbuffer_prepend(void *ptr)
 	evbuffer_add_printf(buf1, "Here is string %d. ", n++);
 	evbuffer_prepend_buffer(buf2, buf1);
 	evbuffer_validate(buf2);
+	evbuffer_validate(buf1);
 	n = evbuffer_remove(buf2, tmp, sizeof(tmp)-1);
 	tmp[n]='\0';
 	tt_str_op(tmp,==,"Here is string 1000. Here is string 999. ");
@@ -1250,6 +1529,10 @@ static const struct testcase_setup_t nil_setup = {
 struct testcase_t evbuffer_testcases[] = {
 	{ "evbuffer", test_evbuffer, 0, NULL, NULL },
 	{ "reserve2", test_evbuffer_reserve2, 0, NULL, NULL },
+	{ "reserve_many", test_evbuffer_reserve_many, 0, NULL, NULL },
+	{ "reserve_many2", test_evbuffer_reserve_many, 0, &nil_setup, (void*)"add" },
+	{ "reserve_many3", test_evbuffer_reserve_many, 0, &nil_setup, (void*)"fill" },
+	{ "expand", test_evbuffer_expand, 0, NULL, NULL },
 	{ "reference", test_evbuffer_reference, 0, NULL, NULL },
 	{ "iterative", test_evbuffer_iterative, 0, NULL, NULL },
 	{ "readln", test_evbuffer_readln, TT_NO_LOGS, &basic_setup, NULL },
@@ -1258,14 +1541,17 @@ struct testcase_t evbuffer_testcases[] = {
 	{ "search", test_evbuffer_search, 0, NULL, NULL },
 	{ "callbacks", test_evbuffer_callbacks, 0, NULL, NULL },
 	{ "add_reference", test_evbuffer_add_reference, 0, NULL, NULL },
-	{ "prepend", test_evbuffer_prepend, 0, NULL, NULL },
+	{ "prepend", test_evbuffer_prepend, TT_FORK, NULL, NULL },
 	{ "peek", test_evbuffer_peek, 0, NULL, NULL },
 	{ "freeze_start", test_evbuffer_freeze, 0, &nil_setup, (void*)"start" },
 	{ "freeze_end", test_evbuffer_freeze, 0, &nil_setup, (void*)"end" },
-#ifndef WIN32
 	/* TODO: need a temp file implementation for Windows */
-	{ "add_file", test_evbuffer_add_file, 0, NULL, NULL },
-#endif
+	{ "add_file_sendfile", test_evbuffer_add_file, TT_FORK, &nil_setup,
+	  (void*)"sendfile" },
+	{ "add_file_mmap", test_evbuffer_add_file, TT_FORK, &nil_setup,
+	  (void*)"mmap" },
+	{ "add_file_linear", test_evbuffer_add_file, TT_FORK, &nil_setup,
+	  (void*)"linear" },
 
 	END_OF_TESTCASES
 };

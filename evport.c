@@ -64,6 +64,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <event2/thread.h>
+
+#include "evthread-internal.h"
 #include "event-internal.h"
 #include "log-internal.h"
 #include "evsignal-internal.h"
@@ -121,7 +124,8 @@ const struct eventop evportops = {
 	evport_dispatch,
 	evport_dealloc,
 	1, /* need reinit */
-	0
+	0, /* features */
+	0, /* fdinfo length */
 };
 
 /*

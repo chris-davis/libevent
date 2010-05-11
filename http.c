@@ -27,8 +27,6 @@
 
 #include "event-config.h"
 
-#define _REENTRANT
-
 #ifdef _EVENT_HAVE_SYS_PARAM_H
 #include <sys/param.h>
 #endif
@@ -977,7 +975,7 @@ evhttp_connection_free(struct evhttp_connection *evcon)
 		bufferevent_free(evcon->bufev);
 
 	if (evcon->fd != -1)
-		EVUTIL_CLOSESOCKET(evcon->fd);
+		evutil_closesocket(evcon->fd);
 
 	if (evcon->bind_address != NULL)
 		mm_free(evcon->bind_address);
@@ -1043,7 +1041,7 @@ evhttp_connection_reset(struct evhttp_connection *evcon)
 		if (evhttp_connected(evcon) && evcon->closecb != NULL)
 			(*evcon->closecb)(evcon, evcon->closecb_arg);
 
-		EVUTIL_CLOSESOCKET(evcon->fd);
+		evutil_closesocket(evcon->fd);
 		evcon->fd = -1;
 	}
 
@@ -1256,15 +1254,14 @@ evhttp_parse_response_line(struct evhttp_request *req, char *line)
 {
 	char *protocol;
 	char *number;
-	char *readable;
+	const char *readable = "";
 
 	protocol = strsep(&line, " ");
 	if (line == NULL)
 		return (-1);
 	number = strsep(&line, " ");
-	if (line == NULL)
-		return (-1);
-	readable = line;
+	if (line != NULL)
+		readable = line;
 
 	if (strcmp(protocol, "HTTP/1.0") == 0) {
 		req->major = 1;
@@ -2336,7 +2333,7 @@ evhttp_parse_query(const char *uri, struct evkeyvalq *headers)
 
 		value = argument;
 		key = strsep(&value, "=");
-		if (value == NULL)
+		if (value == NULL || *key == '\0')
 			goto error;
 
 		if ((decoded_value = mm_malloc(strlen(value) + 1)) == NULL) {
@@ -2425,6 +2422,9 @@ evhttp_handle_request(struct evhttp_request *req, void *arg)
 	struct evhttp *http = arg;
 	struct evhttp_cb *cb = NULL;
 	const char *hostname;
+
+	/* we have a new request on which the user needs to take action */
+	req->userdone = 0;
 
 	if (req->uri == NULL) {
 		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
@@ -2518,7 +2518,7 @@ evhttp_bind_socket_with_handle(struct evhttp *http, const char *address, ev_uint
 
 	if (listen(fd, 128) == -1) {
 		event_sock_warn(fd, "%s: listen", __func__);
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 		return (NULL);
 	}
 
@@ -2989,6 +2989,13 @@ evhttp_associate_new_request_with_connection(struct evhttp_connection *evcon)
 	req->evcon = evcon;	/* the request ends up owning the connection */
 	req->flags |= EVHTTP_REQ_OWN_CONNECTION;
 
+	/* We did not present the request to the user user yet, so treat it as
+	 * if the user was done with the request.  This allows us to free the 
+	 * request on a persistent connection if the client drops it without
+	 * sending a request.
+	 */
+	req->userdone = 1;
+
 	TAILQ_INSERT_TAIL(&evcon->requests, req, next);
 
 	req->kind = EVHTTP_REQUEST;
@@ -3008,7 +3015,7 @@ evhttp_get_request(struct evhttp *http, evutil_socket_t fd,
 	evcon = evhttp_get_request_connection(http, fd, sa, salen);
 	if (evcon == NULL) {
 		event_sock_warn(fd, "%s: cannot get connection on %d", __func__, fd);
-		EVUTIL_CLOSESOCKET(fd);
+		evutil_closesocket(fd);
 		return;
 	}
 
@@ -3104,7 +3111,7 @@ bind_socket_ai(struct evutil_addrinfo *ai, int reuse)
 
  out:
 	serrno = EVUTIL_SOCKET_ERROR();
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 	EVUTIL_SET_SOCKET_ERROR(serrno);
 	return (-1);
 }

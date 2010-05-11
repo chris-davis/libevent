@@ -56,8 +56,8 @@
   */
 struct evmap_io {
 	struct event_list events;
-	unsigned int nread;
-	unsigned int nwrite;
+	ev_uint16_t nread;
+	ev_uint16_t nwrite;
 };
 
 /* An entry for an evmap_signal list: notes all the events that want to know
@@ -83,6 +83,8 @@ struct event_map_entry {
 	} ent;
 };
 
+/* Helper used by the event_io_map hashtable code; tries to return a good hash
+ * of the fd in e->fd. */
 static inline unsigned
 hashsocket(struct event_map_entry *e)
 {
@@ -94,6 +96,8 @@ hashsocket(struct event_map_entry *e)
 	return h;
 }
 
+/* Helper used by the event_io_map hashtable code; returns true iff e1 and e2
+ * have the same e->fd. */
 static inline int
 eqsocket(struct event_map_entry *e1, struct event_map_entry *e2)
 {
@@ -260,10 +264,9 @@ evmap_io_add(struct event_base *base, evutil_socket_t fd, struct event *ev)
 	struct evmap_io *ctx = NULL;
 	int nread, nwrite, retval = 0;
 	short res = 0, old = 0;
+	struct event *old_ev;
 
-	EVUTIL_ASSERT(fd == ev->ev_fd); /*XXX(nickm) always true? */
-	/*XXX(nickm) Should we assert that ev is not already inserted, or should
-	 * we make this function idempotent? */
+	EVUTIL_ASSERT(fd == ev->ev_fd);
 
 	if (fd < 0)
 		return 0;
@@ -293,6 +296,18 @@ evmap_io_add(struct event_base *base, evutil_socket_t fd, struct event *ev)
 		if (++nwrite == 1)
 			res |= EV_WRITE;
 	}
+	if (EVUTIL_UNLIKELY(nread > 0xffff || nwrite > 0xffff)) {
+		event_warnx("Too many events reading or writing on fd %d",
+		    (int)fd);
+		return -1;
+	}
+	if (EVENT_DEBUG_MODE_IS_ON() &&
+	    (old_ev = TAILQ_FIRST(&ctx->events)) &&
+	    (old_ev->ev_events&EV_ET) != (ev->ev_events&EV_ET)) {
+		event_warnx("Tried to mix edge-triggered and non-edge-triggered"
+		    " events on fd %d", (int)fd);
+		return -1;
+	}
 
 	if (res) {
 		void *extra = ((char*)ctx) + sizeof(struct evmap_io);
@@ -300,13 +315,13 @@ evmap_io_add(struct event_base *base, evutil_socket_t fd, struct event *ev)
 		 * level-triggered, we should probably assert on
 		 * this. */
 		if (evsel->add(base, ev->ev_fd,
-					   old, (ev->ev_events & EV_ET) | res, extra) == -1)
+			old, (ev->ev_events & EV_ET) | res, extra) == -1)
 			return (-1);
 		retval = 1;
 	}
 
-	ctx->nread = nread;
-	ctx->nwrite = nwrite;
+	ctx->nread = (ev_uint16_t) nread;
+	ctx->nwrite = (ev_uint16_t) nwrite;
 	TAILQ_INSERT_TAIL(&ctx->events, ev, ev_io_next);
 
 	return (retval);
@@ -326,9 +341,7 @@ evmap_io_del(struct event_base *base, evutil_socket_t fd, struct event *ev)
 	if (fd < 0)
 		return 0;
 
-	EVUTIL_ASSERT(fd == ev->ev_fd); /*XXX(nickm) always true? */
-	/*XXX(nickm) Should we assert that ev is not already inserted, or should
-	 * we make this function idempotent? */
+	EVUTIL_ASSERT(fd == ev->ev_fd);
 
 #ifndef EVMAP_USE_HT
 	if (fd >= io->nentries)
@@ -447,7 +460,7 @@ evmap_signal_del(struct event_base *base, int sig, struct event *ev)
 }
 
 void
-evmap_signal_active(struct event_base *base, int sig, int ncalls)
+evmap_signal_active(struct event_base *base, evutil_socket_t sig, int ncalls)
 {
 	struct event_signal_map *map = &base->sigmap;
 	struct evmap_signal *ctx;
@@ -674,11 +687,12 @@ event_changelist_del(struct event_base *base, evutil_socket_t fd, short old, sho
 
 	/* A delete removes any previous add, rather than replacing it:
 	   on those platforms where "add, delete, dispatch" is not the same
-	   as "no-op" dispatch, we want the no-op behavior.
+	   as "no-op, dispatch", we want the no-op behavior.
 
-	   If we have a no-op item, we could it from the list entirely, but
-	   really there's not much point: skipping the no-op change when we do
-	   the dispatch later is far cheaper than rejuggling the array now.
+	   If we have a no-op item, we could remove it it from the list
+	   entirely, but really there's not much point: skipping the no-op
+	   change when we do the dispatch later is far cheaper than rejuggling
+	   the array now.
 	 */
 
 	if (events & (EV_READ|EV_SIGNAL)) {

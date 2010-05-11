@@ -127,13 +127,11 @@ bufferevent_inbuf_wm_cb(struct evbuffer *buf,
 }
 
 static void
-bufferevent_run_deferred_callbacks(struct deferred_cb *_, void *arg)
+bufferevent_run_deferred_callbacks_locked(struct deferred_cb *_, void *arg)
 {
 	struct bufferevent_private *bufev_private = arg;
 	struct bufferevent *bufev = &bufev_private->bev;
 
-	/* XXXX It would be better to run these without holding the
-	 * bufferevent lock */
 	BEV_LOCK(bufev);
 	if ((bufev_private->eventcb_pending & BEV_EVENT_CONNECTED) &&
 	    bufev->errorcb) {
@@ -159,6 +157,51 @@ bufferevent_run_deferred_callbacks(struct deferred_cb *_, void *arg)
 		bufev->errorcb(bufev, what, bufev->cbarg);
 	}
 	_bufferevent_decref_and_unlock(bufev);
+}
+
+static void
+bufferevent_run_deferred_callbacks_unlocked(struct deferred_cb *_, void *arg)
+{
+	struct bufferevent_private *bufev_private = arg;
+	struct bufferevent *bufev = &bufev_private->bev;
+
+	BEV_LOCK(bufev);
+#define UNLOCKED(stmt) \
+	do { BEV_UNLOCK(bufev); stmt; BEV_LOCK(bufev); } while(0)
+
+	if ((bufev_private->eventcb_pending & BEV_EVENT_CONNECTED) &&
+	    bufev->errorcb) {
+		/* The "connected" happened before any reads or writes, so
+		   send it first. */
+		bufferevent_event_cb errorcb = bufev->errorcb;
+		void *cbarg = bufev->cbarg;
+		bufev_private->eventcb_pending &= ~BEV_EVENT_CONNECTED;
+		UNLOCKED(errorcb(bufev, BEV_EVENT_CONNECTED, cbarg));
+	}
+	if (bufev_private->readcb_pending && bufev->readcb) {
+		bufferevent_data_cb readcb = bufev->readcb;
+		void *cbarg = bufev->cbarg;
+		bufev_private->readcb_pending = 0;
+		UNLOCKED(readcb(bufev, cbarg));
+	}
+	if (bufev_private->writecb_pending && bufev->writecb) {
+		bufferevent_data_cb writecb = bufev->writecb;
+		void *cbarg = bufev->cbarg;
+		bufev_private->writecb_pending = 0;
+		UNLOCKED(writecb(bufev, cbarg));
+	}
+	if (bufev_private->eventcb_pending && bufev->errorcb) {
+		bufferevent_event_cb errorcb = bufev->errorcb;
+		void *cbarg = bufev->cbarg;
+		short what = bufev_private->eventcb_pending;
+		int err = bufev_private->errno_pending;
+		bufev_private->eventcb_pending = 0;
+		bufev_private->errno_pending = 0;
+		EVUTIL_SET_SOCKET_ERROR(err);
+		UNLOCKED(errorcb(bufev,what,cbarg));
+	}
+	_bufferevent_decref_and_unlock(bufev);
+#undef UNLOCKED
 }
 
 #define SCHEDULE_DEFERRED(bevp)						\
@@ -267,14 +310,28 @@ bufferevent_init_common(struct bufferevent_private *bufev_private,
 	if (options & BEV_OPT_THREADSAFE) {
 		if (bufferevent_enable_locking(bufev, NULL) < 0) {
 			/* cleanup */
+			evbuffer_free(bufev->input);
+			evbuffer_free(bufev->output);
+			bufev->input = NULL;
+			bufev->output = NULL;
 			return -1;
 		}
 	}
 #endif
+	if ((options & (BEV_OPT_DEFER_CALLBACKS|BEV_OPT_UNLOCK_CALLBACKS))
+	    == BEV_OPT_UNLOCK_CALLBACKS) {
+		event_warnx("UNLOCK_CALLBACKS requires DEFER_CALLBACKS");
+		return -1;
+	}
 	if (options & BEV_OPT_DEFER_CALLBACKS) {
-		event_deferred_cb_init(&bufev_private->deferred,
-		    bufferevent_run_deferred_callbacks,
-		    bufev_private);
+		if (options & BEV_OPT_UNLOCK_CALLBACKS)
+			event_deferred_cb_init(&bufev_private->deferred,
+			    bufferevent_run_deferred_callbacks_unlocked,
+			    bufev_private);
+		else
+			event_deferred_cb_init(&bufev_private->deferred,
+			    bufferevent_run_deferred_callbacks_locked,
+			    bufev_private);
 	}
 
 	bufev_private->options = options;
@@ -504,16 +561,36 @@ _bufferevent_incref_and_lock(struct bufferevent *bufev)
 	++bufev_private->refcnt;
 }
 
-void
+#if 0
+static void
+_bufferevent_transfer_lock_ownership(struct bufferevent *donor,
+    struct bufferevent *recipient)
+{
+	struct bufferevent_private *d = BEV_UPCAST(donor);
+	struct bufferevent_private *r = BEV_UPCAST(recipient);
+	if (d->lock != r->lock)
+		return;
+	if (r->own_lock)
+		return;
+	if (d->own_lock) {
+		d->own_lock = 0;
+		r->own_lock = 1;
+	}
+}
+#endif
+
+int
 _bufferevent_decref_and_unlock(struct bufferevent *bufev)
 {
 	struct bufferevent_private *bufev_private =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
 	struct bufferevent *underlying;
 
+	EVUTIL_ASSERT(bufev_private->refcnt > 0);
+
 	if (--bufev_private->refcnt) {
 		BEV_UNLOCK(bufev);
-		return;
+		return 0;
 	}
 
 	underlying = bufferevent_get_underlying(bufev);
@@ -548,23 +625,29 @@ _bufferevent_decref_and_unlock(struct bufferevent *bufev)
 		    EVTHREAD_LOCKTYPE_RECURSIVE);
 
 	/* Free the actual allocated memory. */
-	mm_free(bufev - bufev->be_ops->mem_offset);
+	mm_free(((char*)bufev) - bufev->be_ops->mem_offset);
 
-	/* release the reference to underlying now that we no longer need
-	 * the reference to it.  This is mainly in case our lock is shared
-	 * with underlying.
+	/* Release the reference to underlying now that we no longer need the
+	 * reference to it.  We wait this long mainly in case our lock is
+	 * shared with underlying.
+	 *
+	 * The 'destruct' function will also drop a reference to underlying
+	 * if BEV_OPT_CLOSE_ON_FREE is set.
+	 *
 	 * XXX Should we/can we just refcount evbuffer/bufferevent locks?
 	 * It would probably save us some headaches.
 	 */
 	if (underlying)
 		bufferevent_decref(underlying);
+
+	return 1;
 }
 
-void
+int
 bufferevent_decref(struct bufferevent *bufev)
 {
 	BEV_LOCK(bufev);
-	_bufferevent_decref_and_unlock(bufev);
+	return _bufferevent_decref_and_unlock(bufev);
 }
 
 void

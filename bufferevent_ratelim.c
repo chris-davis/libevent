@@ -282,6 +282,7 @@ _bufferevent_decrement_read_buckets(struct bufferevent_private *bev, int bytes)
 	if (bev->rate_limiting->group) {
 		LOCK_GROUP(bev->rate_limiting->group);
 		bev->rate_limiting->group->rate_limit.read_limit -= bytes;
+		bev->rate_limiting->group->total_read += bytes;
 		if (bev->rate_limiting->group->rate_limit.read_limit <= 0) {
 			_bev_group_suspend_reading(bev->rate_limiting->group);
 		}
@@ -313,6 +314,7 @@ _bufferevent_decrement_write_buckets(struct bufferevent_private *bev, int bytes)
 	if (bev->rate_limiting->group) {
 		LOCK_GROUP(bev->rate_limiting->group);
 		bev->rate_limiting->group->rate_limit.write_limit -= bytes;
+		bev->rate_limiting->group->total_written += bytes;
 		if (bev->rate_limiting->group->rate_limit.write_limit <= 0) {
 			_bev_group_suspend_writing(bev->rate_limiting->group);
 		}
@@ -615,6 +617,46 @@ bufferevent_rate_limit_group_new(struct event_base *base,
 }
 
 int
+bufferevent_rate_limit_group_set_cfg(
+	struct bufferevent_rate_limit_group *g,
+	const struct ev_token_bucket_cfg *cfg)
+{
+	int same_tick;
+	if (!g || !cfg)
+		return -1;
+
+	LOCK_GROUP(g);
+	same_tick = evutil_timercmp(
+		&g->rate_limit_cfg.tick_timeout, &cfg->tick_timeout, ==);
+	memcpy(&g->rate_limit_cfg, cfg, sizeof(g->rate_limit_cfg));
+
+	if (g->rate_limit.read_limit > cfg->read_maximum)
+		g->rate_limit.read_limit = cfg->read_maximum;
+	if (g->rate_limit.write_limit > cfg->write_maximum)
+		g->rate_limit.write_limit = cfg->write_maximum;
+
+	if (!same_tick) {
+		/* This can cause a hiccup in the schedule */
+		event_add(&g->master_refill_event, &cfg->tick_timeout);
+	}
+
+	UNLOCK_GROUP(g);
+	return 0;
+}
+
+
+void
+bufferevent_rate_limit_group_free(struct bufferevent_rate_limit_group *g)
+{
+	LOCK_GROUP(g);
+	EVUTIL_ASSERT(0 == g->n_members);
+	event_del(&g->master_refill_event);
+	UNLOCK_GROUP(g);
+	EVTHREAD_FREE_LOCK(g->lock, EVTHREAD_LOCKTYPE_RECURSIVE);
+	mm_free(g);
+}
+
+int
 bufferevent_add_to_rate_limit_group(struct bufferevent *bev,
     struct bufferevent_rate_limit_group *g)
 {
@@ -868,3 +910,19 @@ bufferevent_rate_limit_group_decrement_write(
 	return r;
 }
 
+void
+bufferevent_rate_limit_group_get_totals(struct bufferevent_rate_limit_group *grp,
+    ev_uint64_t *total_read_out, ev_uint64_t *total_written_out)
+{
+	EVUTIL_ASSERT(grp != NULL);
+	if (total_read_out)
+		*total_read_out = grp->total_read;
+	if (total_written_out)
+		*total_written_out = grp->total_written;
+}
+
+void
+bufferevent_rate_limit_group_reset_totals(struct bufferevent_rate_limit_group *grp)
+{
+	grp->total_read = grp->total_written = 0;
+}

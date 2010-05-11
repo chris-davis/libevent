@@ -55,7 +55,7 @@ acceptcb(struct evconnlistener *listener, evutil_socket_t fd,
 	int *ptr = arg;
 	--*ptr;
 	TT_BLATHER(("Got one for %p", ptr));
-	EVUTIL_CLOSESOCKET(fd);
+	evutil_closesocket(fd);
 
 	if (! *ptr)
 		evconnlistener_disable(listener);
@@ -127,6 +127,10 @@ end:
 		EVUTIL_CLOSESOCKET(fd2);
 	if (fd3>=0)
 		EVUTIL_CLOSESOCKET(fd3);
+	if (listener1)
+		evconnlistener_free(listener1);
+	if (listener2)
+		evconnlistener_free(listener2);
 }
 
 

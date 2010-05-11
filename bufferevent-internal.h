@@ -79,6 +79,13 @@ struct bufferevent_rate_limit_group {
 	 * again. */
 	unsigned pending_unsuspend_write : 1;
 
+	/*@{*/
+	/** Total number of bytes read or written in this group since last
+	 * reset. */
+	ev_uint64_t total_read;
+	ev_uint64_t total_written;
+	/*@}*/
+
 	/** The number of bufferevents in the group. */
 	int n_members;
 
@@ -157,6 +164,9 @@ struct bufferevent_private {
 	/** Set to the current socket errno if we have deferred callbacks and
 	 * an events callback is pending. */
 	int errno_pending;
+
+	/** The DNS error code for bufferevent_socket_connect_hostname */
+	int dns_error;
 
 	/** Used to implement deferred callbacks */
 	struct deferred_cb deferred;
@@ -280,11 +290,12 @@ void bufferevent_incref(struct bufferevent *bufev);
 /** Internal: Lock bufev and increase its reference count.
  * unlocking it otherwise. */
 void _bufferevent_incref_and_lock(struct bufferevent *bufev);
-/** Internal: Increment the reference count on bufev. */
-void bufferevent_decref(struct bufferevent *bufev);
+/** Internal: Decrement the reference count on bufev.  Returns 1 if it freed
+ * the bufferevent.*/
+int bufferevent_decref(struct bufferevent *bufev);
 /** Internal: Drop the reference count on bufev, freeing as necessary, and
- * unlocking it otherwise. */
-void _bufferevent_decref_and_unlock(struct bufferevent *bufev);
+ * unlocking it otherwise.  Returns 1 if it freed the bufferevent. */
+int _bufferevent_decref_and_unlock(struct bufferevent *bufev);
 
 /** Internal: If callbacks are deferred and we have a read callback, schedule
  * a readcb.  Otherwise just run the readcb. */
@@ -341,19 +352,23 @@ int _bufferevent_generic_adj_timeouts(struct bufferevent *bev);
  * bufferevent_private. */
 #define BEV_UPCAST(b) EVUTIL_UPCAST((b), struct bufferevent_private, bev)
 
+#ifdef _EVENT_DISABLE_THREAD_SUPPORT
+#define BEV_LOCK(b) _EVUTIL_NIL_STMT
+#define BEV_UNLOCK(b) _EVUTIL_NIL_STMT
+#else
 /** Internal: Grab the lock (if any) on a bufferevent */
 #define BEV_LOCK(b) do {						\
 		struct bufferevent_private *locking =  BEV_UPCAST(b);	\
-		if (locking->lock)					\
-			EVLOCK_LOCK(locking->lock, 0);			\
+		EVLOCK_LOCK(locking->lock, 0);				\
 	} while (0)
 
 /** Internal: Release the lock (if any) on a bufferevent */
 #define BEV_UNLOCK(b) do {						\
 		struct bufferevent_private *locking =  BEV_UPCAST(b);	\
-		if (locking->lock)					\
-			EVLOCK_UNLOCK(locking->lock, 0);		\
+		EVLOCK_UNLOCK(locking->lock, 0);			\
 	} while (0)
+#endif
+
 
 /* ==== For rate-limiting. */
 
