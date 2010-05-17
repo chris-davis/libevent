@@ -535,7 +535,6 @@ event_base_new_with_config(const struct event_config *cfg)
 		event_warn("%s: calloc", __func__);
 		return NULL;
 	}
-
 	detect_monotonic();
 	gettime(base, &base->event_tv);
 
@@ -543,6 +542,8 @@ event_base_new_with_config(const struct event_config *cfg)
 	TAILQ_INIT(&base->eventqueue);
 	base->sig.ev_signal_pair[0] = -1;
 	base->sig.ev_signal_pair[1] = -1;
+	base->th_notify_fd[0] = -1;
+	base->th_notify_fd[1] = -1;
 
 	event_deferred_cb_queue_init(&base->defer_queue);
 	base->defer_queue.notify_fn = notify_base_cbq_callback;
@@ -597,8 +598,6 @@ event_base_new_with_config(const struct event_config *cfg)
 	}
 
 	/* prepare for threading */
-	base->th_notify_fd[0] = -1;
-	base->th_notify_fd[1] = -1;
 
 #ifndef _EVENT_DISABLE_THREAD_SUPPORT
 	if (!cfg || !(cfg->flags & EVENT_BASE_FLAG_NOLOCK)) {
