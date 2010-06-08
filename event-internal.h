@@ -284,6 +284,7 @@ struct event_config {
 
 	enum event_method_feature require_features;
 	enum event_base_config_flag flags;
+	const char *required_method;
 };
 
 /* Internal use only: Functions that might be missing from <sys/queue.h> */

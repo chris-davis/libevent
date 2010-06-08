@@ -841,7 +841,7 @@ poll_compat_thread_loop(void *_ctx)
 static void
 poll_compat_thread_init(struct hybrid_loop_ctx *ctx)
 {
-	const char **methods, *method;
+	const char *method;
 	struct poll_compat_thread *pct;
 	struct event_config *cfg;
 	HANDLE th;
@@ -856,15 +856,9 @@ poll_compat_thread_init(struct hybrid_loop_ctx *ctx)
 	if (!cfg)
 		goto out;
 
-	event_config_set_flag(cfg, EVENT_BASE_FLAG_IGNORE_ENV);
-	methods = event_get_supported_methods();
+	if (event_config_require_method(cfg, "win32") < 0)
+		goto out;
 
-	while (*methods) {
-		if (evutil_ascii_strcasecmp(*methods, "win32"))
-			event_config_avoid_method(cfg, *methods);
-		++methods;
-	}
-		
 	pct->select_base = event_base_new_with_config(cfg);
 	if (!pct->select_base)
 		goto out;
