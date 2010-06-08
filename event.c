@@ -2627,7 +2627,7 @@ evthread_make_base_notifiable(struct event_base *base)
 #ifdef WIN32
 	{
 		HANDLE h;
-		if (base->evsel->features & EV_FEATURE_HANDLES) {
+		if (base->evsel->features & EV_FEATURE_WINHANDLES) {
 			h = CreateEvent(NULL, FALSE, FALSE, NULL);
 			if (h) {
 				base->th_notify_fd[0] = (evutil_socket_t)h;

@@ -1384,7 +1384,7 @@ const struct eventop hybridselectops = {
 	hybrid_loop_dispatch,
 	hybrid_loop_dealloc,
 	0, /* doesn't need_reinit */
-	EV_FEATURE_HANDLES,
+	EV_FEATURE_WINHANDLES,
 	sizeof(struct hybrid_event **),
 };
 
@@ -1396,6 +1396,6 @@ const struct eventop hybrideventselectops = {
 	hybrid_loop_dispatch,
 	hybrid_loop_dealloc,
 	0, /* doesn't need_reinit */
-	EV_FEATURE_HANDLES | EV_FEATURE_O1,
+	EV_FEATURE_WINHANDLES | EV_FEATURE_O1,
 	sizeof(struct hybrid_event **),
 };
