@@ -49,14 +49,14 @@
 /* Hybrid win32 backend.
  *
  * This backend allows monitoring of both win32 handles and sockets. Two
- * variations of this backends are provided: "select" and "eventselect".
- * The former uses select for monitoring sockets for compatibility, and
- * the later uses WSAEventSelect/WaitForObjects. The behavior of the
- * latter is incompatible with select, though it may scale a bit better
- * in some cases. In particular, write events for a socket are triggered
- * again only after a send operation returns WSAEWOULDBLOCK and room in
- * the socket's buffer becomes available. Both "select" and "eventselect"
- * allow monitoring of handles and sockets simultaneously.
+ * variations of this backend are provided: "hybridselect" and
+ * "hybrideventselect". The former uses select for monitoring sockets for
+ * compatibility, and the latter uses WSAEventSelect/WaitForObjects. The
+ * behavior of the latter is incompatible with select, though it may scale
+ * a bit better in some cases. In particular, write events for a socket
+ * are triggered again only after a send operation returns WSAEWOULDBLOCK
+ * and room in the socket's buffer becomes available. Both "select" and
+ * "eventselect" allow monitoring of handles and sockets simultaneously.
  * 
  * A pool of "poll threads" running WaitForMultipleObjects is used to
  * monitor handles (and sockets with WSAEventSelect). For the "select"
@@ -1279,6 +1279,11 @@ hybrid_loop_add(struct event_base *base, evutil_socket_t fd, short old,
 	EVUTIL_ASSERT(events);
 
 	if (!*hevp) {
+		/* It'd be nice to allocate hybrid events together with the
+		 * parent structure, but that would lead to problems if an
+		 * event was deallocated while pending notifications were still
+		 * queued in the IOCP. There's no way to remove stuff from an
+		 * IOCP without fetching it. */
 		*hevp = hybrid_event_new(ctx, fd);
 		if (*hevp == NULL)
 			return -1;
@@ -1372,7 +1377,7 @@ hybrid_loop_dealloc(struct event_base *base)
 }
 
 const struct eventop hybridselectops = {
-	"select",
+	"hybridselect",
 	hybrid_loop_init_select,
 	hybrid_loop_add,
 	hybrid_loop_del,
@@ -1384,7 +1389,7 @@ const struct eventop hybridselectops = {
 };
 
 const struct eventop hybrideventselectops = {
-	"eventselect",
+	"hybrideventselect",
 	hybrid_loop_init_evsel,
 	hybrid_loop_add,
 	hybrid_loop_del,
