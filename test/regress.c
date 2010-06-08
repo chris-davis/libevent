@@ -2167,6 +2167,72 @@ end:
 #undef MANY
 }
 
+#ifdef WIN32
+static void
+win_event_cb(evutil_socket_t s, short what, void *arg)
+{
+	short *p = arg;
+	(*p)++;
+}
+
+static void
+win_set_event_cb(evutil_socket_t s, short what, void *arg)
+{
+	HANDLE *h = arg;
+	SetEvent(*h);
+}
+
+static void
+test_handles(void *arg)
+{
+	int got_event;
+	struct event hev, tev;
+	HANDLE h;
+	struct timeval tv1, tv2;
+	struct event_config *cfg = NULL;
+	struct event_base *base = NULL;
+
+	cfg = event_config_new();
+	tt_assert(cfg);
+	tt_assert(0 == event_config_require_features(cfg,
+				EV_FEATURE_WINHANDLES));
+	base = event_base_new_with_config(cfg);
+	if (!base) {
+		TT_DECLARE("NOTE",
+			   ("No backends support handles, skipping test"));
+		tt_skip();
+	}
+
+	TT_BLATHER(("Using backend %s for handles test",
+			event_base_get_method(base)));
+
+	h = CreateEvent(NULL, FALSE, FALSE, NULL);
+	tt_assert(h != NULL);
+
+	got_event = 0;
+	tv1.tv_sec = 0;
+	tv1.tv_usec = 100 * 1000;
+	event_assign(&tev, base, -1, EV_TIMEOUT, win_set_event_cb, &h);
+	event_add(&tev, &tv1);
+	event_assign(&hev, base, (evutil_socket_t)h, EV_READ,
+			win_event_cb, &got_event);
+	event_add(&hev, NULL);
+
+	tv2.tv_sec = 0;
+	tv2.tv_usec = 300 * 1000;
+	event_base_loopexit(base, &tv2);
+	event_base_dispatch(base);
+
+	tt_int_op(got_event, ==, 1);
+
+end:
+	if (cfg)
+		event_config_free(cfg);
+	if (base)
+		event_base_free(base);
+}
+#endif
+
 struct testcase_t main_testcases[] = {
 	/* Some converted-over tests */
 	{ "methods", test_methods, TT_FORK, NULL, NULL },
@@ -2181,6 +2247,10 @@ struct testcase_t main_testcases[] = {
 
 	BASIC(bad_assign, TT_FORK|TT_NEED_BASE|TT_NO_LOGS),
 	BASIC(bad_reentrant, TT_FORK|TT_NEED_BASE|TT_NO_LOGS),
+
+#ifdef WIN32
+	BASIC(handles, TT_FORK),
+#endif
 
 	/* These are still using the old API */
 	LEGACY(persistent_timeout, TT_FORK|TT_NEED_BASE),
