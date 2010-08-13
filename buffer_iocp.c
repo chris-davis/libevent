@@ -82,12 +82,13 @@ static void
 pin_release(struct evbuffer_overlapped *eo, unsigned flag)
 {
 	int i;
-	struct evbuffer_chain *chain = eo->first_pinned;
+	struct evbuffer_chain *next, *chain = eo->first_pinned;
 
 	for (i = 0; i < eo->n_buffers; ++i) {
 		EVUTIL_ASSERT(chain);
+		next = chain->next;
 		_evbuffer_chain_unpin(chain, flag);
-		chain = chain->next;
+		chain = next;
 	}
 }
 
