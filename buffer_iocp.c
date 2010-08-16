@@ -61,6 +61,9 @@ struct evbuffer_overlapped {
 	/** The first pinned chain in the buffer. */
 	struct evbuffer_chain *first_pinned;
 
+	/** Last chain saved while reading. */
+	struct evbuffer_chain *save_last;
+
 	/** How many chains are pinned; how many of the fields in buffers
 	 * are we using. */
 	int n_buffers;
@@ -116,6 +119,7 @@ evbuffer_commit_read(struct evbuffer *evbuf, ev_ssize_t nBytes)
 		n_vec = 2;
 	}
 
+	_evbuffer_restore_tail(evbuf, buf->first_pinned, buf->save_last);
 	if (evbuffer_commit_space(evbuf, iov, n_vec) < 0)
 		EVUTIL_ASSERT(0); /* XXXX fail nicer. */
 
@@ -267,9 +271,14 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	}
 
 	buf_o->n_buffers = nvecs;
-	buf_o->first_pinned = chain= *chainp;
+	buf_o->first_pinned = chain = *chainp;
+	buf_o->save_last = buf->last;
+
+	_evbuffer_sever_tail(buf, chain);
+
 	npin=0;
 	for ( ; chain; chain = chain->next) {
+		EVUTIL_ASSERT(chain->off == 0);
 		_evbuffer_chain_pin(chain, EVBUFFER_MEM_PINNED_R);
 		++npin;
 	}
