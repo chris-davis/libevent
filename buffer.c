@@ -632,7 +632,7 @@ evbuffer_commit_space(struct evbuffer *buf,
 	firstchainp = buf->last_with_datap;
 	if (!*firstchainp)
 		goto done;
-	if (CHAIN_PINNED_R(*firstchainp) ||
+	if ((buf->first != *firstchainp && CHAIN_PINNED_R(*firstchainp)) ||
 	    CHAIN_SPACE_LEN(*firstchainp) == 0) {
 		firstchainp = &(*firstchainp)->next;
 	}
