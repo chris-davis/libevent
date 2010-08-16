@@ -571,9 +571,10 @@ evbuffer_reserve_space(struct evbuffer *buf, ev_ssize_t size,
 		EVUTIL_ASSERT(vec[0].iov_len >= size);
 		n = 1;
 	} else {
-		if (_evbuffer_expand_fast(buf, size, n_vecs)<0)
+		if (_evbuffer_expand_fast(buf, size, n_vecs, 0)<0)
 			goto done;
-		n = _evbuffer_read_setup_vecs(buf, size, vec, n_vecs, &chainp, 0);
+		n = _evbuffer_read_setup_vecs(buf, size, vec, n_vecs,
+				&chainp, 0, 0);
 	}
 
 done:
@@ -631,7 +632,8 @@ evbuffer_commit_space(struct evbuffer *buf,
 	firstchainp = buf->last_with_datap;
 	if (!*firstchainp)
 		goto done;
-	if (CHAIN_SPACE_LEN(*firstchainp) == 0) {
+	if (CHAIN_PINNED_R(*firstchainp) ||
+	    CHAIN_SPACE_LEN(*firstchainp) == 0) {
 		firstchainp = &(*firstchainp)->next;
 	}
 
@@ -827,7 +829,6 @@ evbuffer_drain(struct evbuffer *buf, size_t len)
 		len = old_len;
 		for (chain = buf->first; chain != NULL; chain = next) {
 			next = chain->next;
-
 			evbuffer_chain_free(chain);
 		}
 
@@ -839,6 +840,7 @@ evbuffer_drain(struct evbuffer *buf, size_t len)
 		buf->total_len -= len;
 
 		for (chain = buf->first; len >= chain->off; chain = next) {
+			EVUTIL_ASSERT(!CHAIN_PINNED_R(chain));
 			next = chain->next;
 			len -= chain->off;
 
@@ -848,8 +850,6 @@ evbuffer_drain(struct evbuffer *buf, size_t len)
 			if (&chain->next == buf->last_with_datap)
 				buf->last_with_datap = &buf->first;
 
-			if (len == 0 && CHAIN_PINNED_R(chain))
-				break;
 			evbuffer_chain_free(chain);
 		}
 
@@ -1662,7 +1662,8 @@ err:
 /* Make sure that datlen bytes are available for writing in the last n
  * chains.  Never copies or moves data. */
 int
-_evbuffer_expand_fast(struct evbuffer *buf, size_t datlen, int n)
+_evbuffer_expand_fast(struct evbuffer *buf, size_t datlen, int n,
+		      int empty_only)
 {
 	struct evbuffer_chain *chain = buf->last, *tmp, *next;
 	size_t avail;
@@ -1689,8 +1690,11 @@ _evbuffer_expand_fast(struct evbuffer *buf, size_t datlen, int n)
 	 * space we have in the first n. */
 	for (chain = *buf->last_with_datap; chain; chain = chain->next) {
 		if (chain->off) {
-			size_t space = CHAIN_SPACE_LEN(chain);
+			size_t space;
 			EVUTIL_ASSERT(chain == *buf->last_with_datap);
+			if (empty_only)
+			       continue;
+			space = CHAIN_SPACE_LEN(chain);
 			if (space) {
 				avail += space;
 				++used;
@@ -1818,12 +1822,14 @@ evbuffer_expand(struct evbuffer *buf, size_t datlen)
       reading into.
     @param exact Boolean: if true, we do not provide more than 'howmuch'
       space in the vectors, even if more space is available.
+    @param empty_only Boolean: if true, we only use empty chains, even
+      if there's space available in the last chain with data.
     @return The number of buffers we're using.
  */
 int
 _evbuffer_read_setup_vecs(struct evbuffer *buf, ev_ssize_t howmuch,
     struct evbuffer_iovec *vecs, int n_vecs_avail,
-    struct evbuffer_chain ***chainp, int exact)
+    struct evbuffer_chain ***chainp, int exact, int empty_only)
 {
 	struct evbuffer_chain *chain;
 	struct evbuffer_chain **firstchainp;
@@ -1837,7 +1843,8 @@ _evbuffer_read_setup_vecs(struct evbuffer *buf, ev_ssize_t howmuch,
 	so_far = 0;
 	/* Let firstchain be the first chain with any space on it */
 	firstchainp = buf->last_with_datap;
-	if (CHAIN_SPACE_LEN(*firstchainp) == 0) {
+	if (CHAIN_SPACE_LEN(*firstchainp) == 0 ||
+	    (empty_only && (*firstchainp)->off)) {
 		firstchainp = &(*firstchainp)->next;
 	}
 
@@ -1907,20 +1914,20 @@ evbuffer_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch)
 #ifdef USE_IOVEC_IMPL
 	/* Since we can use iovecs, we're willing to use the last
 	 * NUM_READ_IOVEC chains. */
-	if (_evbuffer_expand_fast(buf, howmuch, NUM_READ_IOVEC) == -1) {
+	if (_evbuffer_expand_fast(buf, howmuch, NUM_READ_IOVEC, 0) == -1) {
 		result = -1;
 		goto done;
 	} else {
 		IOV_TYPE vecs[NUM_READ_IOVEC];
 #ifdef _EVBUFFER_IOVEC_IS_NATIVE
 		nvecs = _evbuffer_read_setup_vecs(buf, howmuch, vecs,
-		    NUM_READ_IOVEC, &chainp, 1);
+		    NUM_READ_IOVEC, &chainp, 1, 0);
 #else
 		/* We aren't using the native struct iovec.  Therefore,
 		   we are on win32. */
 		struct evbuffer_iovec ev_vecs[NUM_READ_IOVEC];
 		nvecs = _evbuffer_read_setup_vecs(buf, howmuch, ev_vecs, 2,
-		    &chainp, 1);
+		    &chainp, 1, 0);
 
 		for (i=0; i < nvecs; ++i)
 			WSABUF_FROM_EVBUFFER_IOV(&vecs[i], &ev_vecs[i]);

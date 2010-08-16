@@ -247,7 +247,7 @@ void _evbuffer_decref_and_unlock(struct evbuffer *buffer);
 
 /** As evbuffer_expand, but does not guarantee that the newly allocated memory
  * is contiguous.  Instead, it may be split across two or more chunks. */
-int _evbuffer_expand_fast(struct evbuffer *, size_t, int);
+int _evbuffer_expand_fast(struct evbuffer *, size_t, int, int);
 
 /** Helper: prepares for a readv/WSARecv call by expanding the buffer to
  * hold enough memory to read 'howmuch' bytes in possibly noncontiguous memory.
@@ -256,7 +256,8 @@ int _evbuffer_expand_fast(struct evbuffer *, size_t, int);
  * Returns the number of vecs used.
  */
 int _evbuffer_read_setup_vecs(struct evbuffer *buf, ev_ssize_t howmuch,
-    struct evbuffer_iovec *vecs, int n_vecs, struct evbuffer_chain ***chainp, int exact);
+    struct evbuffer_iovec *vecs, int n_vecs, struct evbuffer_chain ***chainp,
+    int exact, int empty_only);
 
 /* Helper macro: copies an evbuffer_iovec in ei to a win32 WSABUF in i. */
 #define WSABUF_FROM_EVBUFFER_IOV(i,ei) do {		\
