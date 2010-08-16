@@ -251,7 +251,7 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	buf_o->n_buffers = 0;
 	memset(buf_o->buffers, 0, sizeof(buf_o->buffers));
 
-	if (_evbuffer_expand_fast(buf, at_most, 2) == -1)
+	if (_evbuffer_expand_fast(buf, at_most, 2, 1) == -1)
 		goto done;
 	evbuffer_freeze(buf, 0);
 
@@ -259,7 +259,7 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	 * not "2".  But commit_read() above can't handle more than two
 	 * buffers yet. */
 	nvecs = _evbuffer_read_setup_vecs(buf, at_most,
-	    vecs, 2, &chainp, 1);
+	    vecs, 2, &chainp, 1, 1);
 	for (i=0;i<nvecs;++i) {
 		WSABUF_FROM_EVBUFFER_IOV(
 			&buf_o->buffers[i],
