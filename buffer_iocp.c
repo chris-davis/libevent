@@ -99,8 +99,8 @@ void
 evbuffer_commit_read(struct evbuffer *evbuf, ev_ssize_t nBytes)
 {
 	struct evbuffer_overlapped *buf = upcast_evbuffer(evbuf);
-	struct evbuffer_iovec iov[2];
-	int n_vec;
+	struct evbuffer_iovec iov[MAX_WSABUFS];
+	unsigned nvec;
 
 	EVBUFFER_LOCK(evbuf);
 	EVUTIL_ASSERT(buf->read_in_progress && !buf->write_in_progress);
@@ -108,20 +108,22 @@ evbuffer_commit_read(struct evbuffer *evbuf, ev_ssize_t nBytes)
 
 	evbuffer_unfreeze(evbuf, 0);
 
-	iov[0].iov_base = buf->buffers[0].buf;
-	if ((size_t)nBytes <= buf->buffers[0].len) {
-		iov[0].iov_len = nBytes;
-		n_vec = 1;
-	} else {
-		iov[0].iov_len = buf->buffers[0].len;
-		iov[1].iov_base = buf->buffers[1].buf;
-		iov[1].iov_len = nBytes - iov[0].iov_len;
-		n_vec = 2;
+	for (nvec = 0; nvec < buf->n_buffers; ++nvec) {
+		ev_ssize_t len = buf->buffers[nvec].len;
+		iov[nvec].iov_base = buf->buffers[nvec].buf;
+		if (nBytes >= len) {
+			iov[nvec].iov_len = len;
+			nBytes -= len;
+		} else {
+			iov[nvec].iov_len = nBytes;
+			break;
+		}
 	}
 
 	_evbuffer_restore_tail(evbuf, buf->first_pinned, buf->save_last);
-	if (evbuffer_commit_space(evbuf, iov, n_vec) < 0)
-		EVUTIL_ASSERT(0); /* XXXX fail nicer. */
+
+	// XXX check rv
+	evbuffer_commit_space(evbuf, iov, nvec+1);
 
 	pin_release(buf, EVBUFFER_MEM_PINNED_R);
 
@@ -189,7 +191,7 @@ evbuffer_launch_write(struct evbuffer *buf, ev_ssize_t at_most,
 	}
 	evbuffer_freeze(buf, 1);
 
-	buf_o->first_pinned = 0;
+	buf_o->first_pinned = NULL;
 	buf_o->n_buffers = 0;
 	memset(buf_o->buffers, 0, sizeof(buf_o->buffers));
 
@@ -251,19 +253,16 @@ evbuffer_launch_read(struct evbuffer *buf, size_t at_most,
 	if (buf->freeze_end || buf_o->read_in_progress)
 		goto done;
 
-	buf_o->first_pinned = 0;
+	buf_o->first_pinned = NULL;
 	buf_o->n_buffers = 0;
 	memset(buf_o->buffers, 0, sizeof(buf_o->buffers));
 
-	if (_evbuffer_expand_fast(buf, at_most, 2, 1) == -1)
+	if (_evbuffer_expand_fast(buf, at_most, MAX_WSABUFS, 1) == -1)
 		goto done;
 	evbuffer_freeze(buf, 0);
 
-	/* XXX This and evbuffer_read_setup_vecs() should say MAX_WSABUFS,
-	 * not "2".  But commit_read() above can't handle more than two
-	 * buffers yet. */
 	nvecs = _evbuffer_read_setup_vecs(buf, at_most,
-	    vecs, 2, &chainp, 1, 1);
+	    vecs, MAX_WSABUFS, &chainp, 1, 1);
 	for (i=0;i<nvecs;++i) {
 		WSABUF_FROM_EVBUFFER_IOV(
 			&buf_o->buffers[i],
