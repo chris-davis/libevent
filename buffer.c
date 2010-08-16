@@ -2866,3 +2866,35 @@ _evbuffer_testing_use_linear_file_access(void)
 #endif
 	return 1;
 }
+
+void
+_evbuffer_sever_tail(struct evbuffer *buf, struct evbuffer_chain *chain)
+{
+	struct evbuffer_chain *lwd;
+
+	ASSERT_EVBUFFER_LOCKED(buf);
+
+	if (chain == buf->first) {
+		ZERO_CHAIN(buf);
+	} else {
+		lwd = *buf->last_with_datap;
+		EVUTIL_ASSERT(chain == lwd->next);
+		lwd->next = NULL;
+		buf->last = lwd;
+	}
+}
+
+void
+_evbuffer_restore_tail(struct evbuffer *buf, struct evbuffer_chain *chain,
+		       struct evbuffer_chain *last)
+{
+	ASSERT_EVBUFFER_LOCKED(buf);
+
+	buf->last = last;
+	if (*buf->last_with_datap)
+		(*buf->last_with_datap)->next = chain;
+	else {
+		buf->last_with_datap = &buf->first;
+		buf->first = chain;
+	}
+}
