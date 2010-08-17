@@ -99,8 +99,9 @@ void
 evbuffer_commit_read(struct evbuffer *evbuf, ev_ssize_t nBytes)
 {
 	struct evbuffer_overlapped *buf = upcast_evbuffer(evbuf);
-	struct evbuffer_iovec iov[MAX_WSABUFS];
-	unsigned nvec;
+	struct evbuffer_chain **chainp;
+	size_t remaining, len;
+	unsigned i;
 
 	EVBUFFER_LOCK(evbuf);
 	EVUTIL_ASSERT(buf->read_in_progress && !buf->write_in_progress);
@@ -108,26 +109,28 @@ evbuffer_commit_read(struct evbuffer *evbuf, ev_ssize_t nBytes)
 
 	evbuffer_unfreeze(evbuf, 0);
 
-	for (nvec = 0; nvec < buf->n_buffers; ++nvec) {
-		ev_ssize_t len = buf->buffers[nvec].len;
-		iov[nvec].iov_base = buf->buffers[nvec].buf;
-		if (nBytes >= len) {
-			iov[nvec].iov_len = len;
-			nBytes -= len;
-		} else {
-			iov[nvec].iov_len = nBytes;
-			break;
-		}
-	}
-
 	_evbuffer_restore_tail(evbuf, buf->first_pinned, buf->save_last);
 
-	// XXX check rv
-	evbuffer_commit_space(evbuf, iov, nvec+1);
+	chainp = evbuf->last_with_datap;
+	if ((*chainp)->next)
+		chainp = &(*chainp)->next;
+	remaining = nBytes;
+	for (i = 0; remaining > 0 && i < buf->n_buffers; ++i) {
+		EVUTIL_ASSERT(*chainp && !(*chainp)->off);
+		len = buf->buffers[i].len;
+		if (remaining < len)
+			len = remaining;
+		(*chainp)->off += len;
+		evbuf->last_with_datap = chainp;
+		remaining -= len;
+		chainp = &(*chainp)->next;
+	}
 
 	pin_release(buf, EVBUFFER_MEM_PINNED_R);
 
 	buf->read_in_progress = 0;
+
+	evbuf->total_len += nBytes;
 
 	_evbuffer_decref_and_unlock(evbuf);
 }
