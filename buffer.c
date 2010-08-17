@@ -2867,6 +2867,63 @@ _evbuffer_testing_use_linear_file_access(void)
 }
 
 void
+_evbuffer_dump(struct evbuffer *buf)
+{
+	struct evbuffer_chain *chain;
+
+	EVBUFFER_LOCK(buf);
+
+	fprintf(stderr, "dump buf, %p\n", buf);
+	fprintf(stderr, "buf->total_len = %u\n", (unsigned)buf->total_len);
+	fprintf(stderr, "buf->freeze_start = %d\n", buf->freeze_start);
+	fprintf(stderr, "buf->freeze_end = %d\n", buf->freeze_end);
+	fprintf(stderr, "buf->first = %p\n", buf->first);
+	fprintf(stderr, "buf->last = %p\n", buf->last);
+	fprintf(stderr, "buf->last_with_datap = %p\n\n", *buf->last_with_datap);
+
+	fprintf(stderr, "Chains\n");
+
+	for (chain = buf->first; chain; chain = chain->next) {
+		size_t i;
+		char flags[64] = {0};
+
+		fprintf(stderr, "  chain = %p\n", chain);
+		fprintf(stderr, "  chain->buffer_len = %u\n",
+			(unsigned)chain->buffer_len);
+		fprintf(stderr, "  chain->misalign = %u\n",
+			(unsigned)chain->misalign);
+		fprintf(stderr, "  chain->off = %u\n",
+			(unsigned)chain->off);
+
+		i = 0;
+		if (chain->flags & EVBUFFER_MMAP)
+			flags[i++] = 'M';
+		if (chain->flags & EVBUFFER_SENDFILE)
+			flags[i++] = 'S';
+		if (chain->flags & EVBUFFER_REFERENCE)
+			flags[i++] = 'R';
+		if (chain->flags & EVBUFFER_IMMUTABLE)
+			flags[i++] = 'I';
+		if (chain->flags & EVBUFFER_MEM_PINNED_R) {
+			flags[i++] = 'P';
+			flags[i++] = 'r';
+		}
+		if (chain->flags & EVBUFFER_MEM_PINNED_W) {
+			flags[i++] = 'P';
+			flags[i++] = 'w';
+		}
+		if (chain->flags & EVBUFFER_DANGLING)
+			flags[i++] = 'D';
+
+		fprintf(stderr, "  chain->flags = %s\n", flags);
+		fprintf(stderr, "  chain->buffer = %p\n", chain->buffer);
+		fprintf(stderr, "\n");
+	}
+
+	EVBUFFER_UNLOCK(buf);
+}
+
+void
 _evbuffer_sever_tail(struct evbuffer *buf, struct evbuffer_chain *chain)
 {
 	struct evbuffer_chain *lwd;

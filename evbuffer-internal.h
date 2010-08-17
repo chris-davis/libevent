@@ -268,6 +268,8 @@ int _evbuffer_read_setup_vecs(struct evbuffer *buf, ev_ssize_t howmuch,
 /** Set the parent bufferevent object for buf to bev */
 void evbuffer_set_parent(struct evbuffer *buf, struct bufferevent *bev);
 
+void _evbuffer_dump(struct evbuffer *buf);
+
 /** Separate buf's tail starting at chain. */
 void _evbuffer_sever_tail(struct evbuffer *buf,
 		struct evbuffer_chain *chain);
