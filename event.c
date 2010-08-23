@@ -605,6 +605,7 @@ event_base_new_with_config(const struct event_config *cfg)
 		    EVTHREAD_LOCKTYPE_RECURSIVE);
 		base->defer_queue.lock = base->th_base_lock;
 		EVTHREAD_ALLOC_COND(base->current_event_cond);
+		EVTHREAD_ALLOC_COND(base->defer_queue.not_full_cond);
 		r = evthread_make_base_notifiable(base);
 		if (r<0) {
 			event_base_free(base);
@@ -1265,6 +1266,8 @@ event_process_deferred_callbacks(struct deferred_cb_queue *queue, int *breakptr)
 		cb->queued = 0;
 		TAILQ_REMOVE(&queue->deferred_cb_list, cb, cb_next);
 		--queue->active_count;
+		if (queue->lock)
+			EVTHREAD_COND_BROADCAST(queue->not_full_cond);
 		UNLOCK_DEFERRED_QUEUE(queue);
 
 		cb->cb(cb, cb->arg);
@@ -2182,6 +2185,8 @@ event_deferred_cb_cancel(struct deferred_cb_queue *queue,
 		TAILQ_REMOVE(&queue->deferred_cb_list, cb, cb_next);
 		--queue->active_count;
 		cb->queued = 0;
+		if (queue->lock)
+			EVTHREAD_COND_BROADCAST(queue->not_full_cond);
 	}
 	UNLOCK_DEFERRED_QUEUE(queue);
 }
@@ -2198,6 +2203,13 @@ event_deferred_cb_schedule(struct deferred_cb_queue *queue,
 	}
 
 	LOCK_DEFERRED_QUEUE(queue);
+
+#define MAX_DEFERRED_CALLBACKS 256
+	if (queue->lock) {
+		while (queue->active_count >= MAX_DEFERRED_CALLBACKS)
+			EVTHREAD_COND_WAIT(queue->not_full_cond, queue->lock);
+	}
+
 	if (!cb->queued) {
 		cb->queued = 1;
 		TAILQ_INSERT_TAIL(&queue->deferred_cb_list, cb, cb_next);

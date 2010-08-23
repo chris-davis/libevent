@@ -55,6 +55,9 @@ struct deferred_cb_queue {
 	/** Lock used to protect the queue. */
 	void *lock;
 
+	/** Condition to wait on when the queue is full. */
+	void *not_full_cond;
+
 	/** How many entries are in the queue? */
 	int active_count;
 
