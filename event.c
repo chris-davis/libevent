@@ -603,7 +603,8 @@ event_base_new_with_config(const struct event_config *cfg)
 		int r;
 		EVTHREAD_ALLOC_LOCK(base->th_base_lock,
 		    EVTHREAD_LOCKTYPE_RECURSIVE);
-		base->defer_queue.lock = base->th_base_lock;
+		EVTHREAD_ALLOC_LOCK(base->defer_queue.lock,
+		    EVTHREAD_LOCKTYPE_RECURSIVE);
 		EVTHREAD_ALLOC_COND(base->current_event_cond);
 		r = evthread_make_base_notifiable(base);
 		if (r<0) {
@@ -730,6 +731,7 @@ event_base_free(struct event_base *base)
 	event_changelist_freemem(&base->changelist);
 
 	EVTHREAD_FREE_LOCK(base->th_base_lock, EVTHREAD_LOCKTYPE_RECURSIVE);
+	EVTHREAD_FREE_LOCK(base->defer_queue.lock, EVTHREAD_LOCKTYPE_RECURSIVE);
 	EVTHREAD_FREE_COND(base->current_event_cond);
 
 	mm_free(base);
@@ -1251,29 +1253,40 @@ event_process_active_single_queue(struct event_base *base,
 }
 
 /*
-   Process all the defered_cb entries in 'queue'.  If *breakptr becomes set to
-   1, stop.  Requires that we start out holding the lock on 'queue'; releases
-   the lock around 'queue' for each deferred_cb we process.
+ * Process queued deferred callbacks for base, stopping if base->event_break is
+ * set. The queue's lock is held while callbacks are processed to prevent
+ * a runaway loop if other threads are filling the queue. The base lock must
+ * be held when calling this function.
  */
 static int
-event_process_deferred_callbacks(struct deferred_cb_queue *queue, int *breakptr)
+event_process_deferred_callbacks(struct event_base *base)
 {
 	int count = 0;
 	struct deferred_cb *cb;
 
-	while ((cb = TAILQ_FIRST(&queue->deferred_cb_list))) {
+	EVENT_BASE_ASSERT_LOCKED(base);
+
+	LOCK_DEFERRED_QUEUE(&base->defer_queue);
+
+	while ((cb = TAILQ_FIRST(&base->defer_queue.deferred_cb_list))) {
 		cb->queued = 0;
-		TAILQ_REMOVE(&queue->deferred_cb_list, cb, cb_next);
-		--queue->active_count;
-		UNLOCK_DEFERRED_QUEUE(queue);
+		TAILQ_REMOVE(&base->defer_queue.deferred_cb_list, cb, cb_next);
+		--base->defer_queue.active_count;
 
+		EVBASE_RELEASE_LOCK(base, th_base_lock);
 		cb->cb(cb, cb->arg);
-		++count;
-		if (*breakptr)
-			return -1;
+		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
-		LOCK_DEFERRED_QUEUE(queue);
+		++count;
+		if (base->event_break) {
+			count = -1;
+			goto out;
+		}
 	}
+
+out:
+	UNLOCK_DEFERRED_QUEUE(&base->defer_queue);
+
 	return count;
 }
 
@@ -1304,7 +1317,7 @@ event_process_active(struct event_base *base)
 		}
 	}
 
-	event_process_deferred_callbacks(&base->defer_queue,&base->event_break);
+	event_process_deferred_callbacks(base);
 }
 
 /*
@@ -2202,9 +2215,7 @@ event_deferred_cb_schedule(struct deferred_cb_queue *queue,
 		cb->queued = 1;
 		TAILQ_INSERT_TAIL(&queue->deferred_cb_list, cb, cb_next);
 		++queue->active_count;
-		/* XXXX Can we get away with doing this only when adding
-		 * the first active deferred_cb to the queue? */
-		if (queue->notify_fn)
+		if (queue->notify_fn && queue->active_count == 1)
 			queue->notify_fn(queue, queue->notify_arg);
 	}
 	UNLOCK_DEFERRED_QUEUE(queue);
