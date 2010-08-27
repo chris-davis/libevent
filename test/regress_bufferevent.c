@@ -422,9 +422,8 @@ listen_cb(struct evconnlistener *listener, evutil_socket_t fd,
 	TT_BLATHER(("Got a request on socket %d", (int)fd ));
 	bev = bufferevent_socket_new(base, fd, bufferevent_connect_test_flags);
 	tt_assert(bev);
-	bufferevent_write(bev, s, sizeof(s));
 	bufferevent_setcb(bev, NULL, sender_writecb, sender_errorcb, NULL);
-	bufferevent_enable(bev, EV_WRITE);
+	bufferevent_write(bev, s, sizeof(s));
 end:
 	;
 }
