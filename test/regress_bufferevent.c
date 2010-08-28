@@ -512,13 +512,6 @@ test_bufferevent_connect(void *arg)
 	tt_want(!bufferevent_socket_connect(bev1, sa, sizeof(localhost)));
 	tt_want(!bufferevent_socket_connect(bev2, sa, sizeof(localhost)));
 
-#ifdef WIN32
-	/* FIXME this is to get IOCP to work. it shouldn't be required. */
-	{
-		struct timeval tv = {5000,0};
-		event_base_loopexit(data->base, &tv);
-	}
-#endif
 	event_base_dispatch(data->base);
 
 	tt_int_op(n_strings_read, ==, 2);
@@ -607,13 +600,6 @@ test_bufferevent_connect_fail(void *arg)
 	event_add(&close_listener_event, &one_second);
 	close_listener_event_added = 1;
 
-#ifdef WIN32
-	/* FIXME this is to get IOCP to work. it shouldn't be required. */
-	{
-		struct timeval tv = {5000,0};
-		event_base_loopexit(data->base, &tv);
-	}
-#endif
 	event_base_dispatch(data->base);
 
 	tt_int_op(test_ok, ==, 1);
