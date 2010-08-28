@@ -133,6 +133,7 @@ bufferevent_run_deferred_callbacks_locked(struct deferred_cb *_, void *arg)
 	struct bufferevent *bufev = &bufev_private->bev;
 
 	BEV_LOCK(bufev);
+	bufev_private->defer_pending = 0;
 	if ((bufev_private->eventcb_pending & BEV_EVENT_CONNECTED) &&
 	    bufev->errorcb) {
 		/* The "connected" happened before any reads or writes, so
@@ -169,6 +170,7 @@ bufferevent_run_deferred_callbacks_unlocked(struct deferred_cb *_, void *arg)
 #define UNLOCKED(stmt) \
 	do { BEV_UNLOCK(bufev); stmt; BEV_LOCK(bufev); } while(0)
 
+	bufev_private->defer_pending = 0;
 	if ((bufev_private->eventcb_pending & BEV_EVENT_CONNECTED) &&
 	    bufev->errorcb) {
 		/* The "connected" happened before any reads or writes, so
@@ -206,6 +208,7 @@ bufferevent_run_deferred_callbacks_unlocked(struct deferred_cb *_, void *arg)
 
 #define SCHEDULE_DEFERRED(bevp)						\
 	do {								\
+		(bevp)->defer_pending = 1;				\
 		bufferevent_incref(&(bevp)->bev);			\
 		BEV_UNLOCK(&(bevp)->bev);				\
 		event_deferred_cb_schedule(				\
@@ -225,7 +228,7 @@ _bufferevent_run_readcb(struct bufferevent *bufev)
 		return;
 	if (p->options & BEV_OPT_DEFER_CALLBACKS) {
 		p->readcb_pending = 1;
-		if (!p->deferred.queued)
+		if (!p->defer_pending)
 			SCHEDULE_DEFERRED(p);
 	} else {
 		bufev->readcb(bufev, bufev->cbarg);
@@ -242,7 +245,7 @@ _bufferevent_run_writecb(struct bufferevent *bufev)
 		return;
 	if (p->options & BEV_OPT_DEFER_CALLBACKS) {
 		p->writecb_pending = 1;
-		if (!p->deferred.queued)
+		if (!p->defer_pending)
 			SCHEDULE_DEFERRED(p);
 	} else {
 		bufev->writecb(bufev, bufev->cbarg);
@@ -260,7 +263,7 @@ _bufferevent_run_eventcb(struct bufferevent *bufev, short what)
 	if (p->options & BEV_OPT_DEFER_CALLBACKS) {
 		p->eventcb_pending |= what;
 		p->errno_pending = EVUTIL_SOCKET_ERROR();
-		if (!p->deferred.queued)
+		if (!p->defer_pending)
 			SCHEDULE_DEFERRED(p);
 	} else {
 		bufev->errorcb(bufev, what, bufev->cbarg);

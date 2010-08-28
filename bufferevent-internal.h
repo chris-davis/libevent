@@ -136,6 +136,8 @@ struct bufferevent_private {
 	/** If set, we should free the lock when we free the bufferevent. */
 	unsigned own_lock : 1;
 
+	/** Flag: set if a thread is waiting to queue a deferred callback. */
+	unsigned defer_pending : 1;
 	/** Flag: set if we have deferred callbacks and a read callback is
 	 * pending. */
 	unsigned readcb_pending : 1;
