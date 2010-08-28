@@ -767,9 +767,16 @@ event_reinit(struct event_base *base)
 
 	evsel = base->evsel;
 
+#if 0
+	/* Right now, reinit always takes effect, since even if the
+	   backend doesn't require it, the signal socketpair code does.
+
+	   XXX
+	 */
 	/* check if this event mechanism requires reinit */
 	if (!evsel->need_reinit)
 		goto done;
+#endif
 
 	/* prevent internal delete */
 	if (base->sig.ev_signal_added) {
@@ -1858,6 +1865,11 @@ event_add(struct event *ev, const struct timeval *tv)
 {
 	int res;
 
+	if (EVUTIL_FAILURE_CHECK(!ev->ev_base)) {
+		event_warnx("%s: event has no event_base set.", __func__);
+		return -1;
+	}
+
 	EVBASE_ACQUIRE_LOCK(ev->ev_base, th_base_lock);
 
 	res = event_add_internal(ev, tv, 0);
@@ -2070,6 +2082,11 @@ event_del(struct event *ev)
 {
 	int res;
 
+	if (EVUTIL_FAILURE_CHECK(!ev->ev_base)) {
+		event_warnx("%s: event has no event_base set.", __func__);
+		return -1;
+	}
+
 	EVBASE_ACQUIRE_LOCK(ev->ev_base, th_base_lock);
 
 	res = event_del_internal(ev);
@@ -2157,6 +2174,11 @@ event_del_internal(struct event *ev)
 void
 event_active(struct event *ev, int res, short ncalls)
 {
+	if (EVUTIL_FAILURE_CHECK(!ev->ev_base)) {
+		event_warnx("%s: event has no event_base set.", __func__);
+		return;
+	}
+
 	EVBASE_ACQUIRE_LOCK(ev->ev_base, th_base_lock);
 
 	_event_debug_assert_is_setup(ev);
