@@ -29,6 +29,7 @@
 #include <event2/event.h>
 #include <event2/thread.h>
 #include <event2/buffer.h>
+#include <event2/buffer_compat.h>
 #include <event2/bufferevent.h>
 
 #include <winsock2.h>
@@ -44,6 +45,7 @@
 #undef WIN32_LEAN_AND_MEAN
 
 #include "iocp-internal.h"
+#include "evbuffer-internal.h"
 #include "evthread-internal.h"
 
 /* FIXME remove these ones */
@@ -177,6 +179,8 @@ test_iocp_evbuffer(void *ptr)
 	struct event_overlapped rol, wol;
 	struct basic_test_data *data = ptr;
 	struct event_iocp_port *port = NULL;
+	struct evbuffer *buf;
+	struct evbuffer_chain *chain;
 	char junk[1024];
 	int i;
 
@@ -202,9 +206,16 @@ test_iocp_evbuffer(void *ptr)
 	for (i=0;i<10;++i)
 		evbuffer_add(wbuf, junk, sizeof(junk));
 
+	buf = evbuffer_new();
+	tt_assert(buf != NULL);
+	evbuffer_add(rbuf, junk, sizeof(junk));
+	tt_assert(!evbuffer_launch_read(rbuf, 2048, &rol));
+	evbuffer_add_buffer(buf, rbuf);
+	tt_int_op(evbuffer_get_length(buf), ==, sizeof(junk));
+	for (chain = buf->first; chain; chain = chain->next)
+		tt_int_op(chain->flags & EVBUFFER_MEM_PINNED_ANY, ==, 0);
 	tt_assert(!evbuffer_get_length(rbuf));
 	tt_assert(!evbuffer_launch_write(wbuf, 512, &wol));
-	tt_assert(!evbuffer_launch_read(rbuf, 2048, &rol));
 
 #ifdef WIN32
 	/* FIXME this is stupid. */
@@ -219,6 +230,7 @@ test_iocp_evbuffer(void *ptr)
 end:
 	evbuffer_free(rbuf);
 	evbuffer_free(wbuf);
+	evbuffer_free(buf);
 }
 
 static void
