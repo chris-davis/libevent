@@ -359,6 +359,7 @@ connect_complete(struct event_overlapped *eo, ev_uintptr_t key,
 
 	EVUTIL_ASSERT(bev_a->bev.connecting);
 	bev_a->bev.connecting = 0;
+	event_base_del_virtual(bev->ev_base);
 
 	if (ok)
 		bufferevent_async_set_connected(bev);
@@ -563,12 +564,14 @@ bufferevent_async_connect(struct bufferevent *bev, evutil_socket_t fd,
 	    WSAGetLastError() != WSAEINVAL)
 		return -1;
 
+	event_base_add_virtual(bev->ev_base);
 	bufferevent_incref(bev);
 	rc = ext->ConnectEx(fd, sa, socklen, NULL, 0, NULL,
 			    &bev_async->connect_overlapped.overlapped);
 	if (rc || WSAGetLastError() == ERROR_IO_PENDING)
 		return 0;
 
+	event_base_del_virtual(bev->ev_base);
 	bufferevent_decref(bev);
 
 	return -1;
