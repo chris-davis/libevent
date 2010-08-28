@@ -109,7 +109,7 @@ test_iocp_port(void *ptr)
 	event_overlapped_init(&o1.eo, dummy_cb);
 	event_overlapped_init(&o2.eo, dummy_cb);
 
-	port = event_iocp_port_launch();
+	port = event_iocp_port_launch(0);
 	tt_assert(port);
 
 	tt_assert(!event_iocp_activate_overlapped(port, &o1.eo, 10, 100));
@@ -191,7 +191,7 @@ test_iocp_evbuffer(void *ptr)
 	evbuffer_enable_locking(rbuf, NULL);
 	evbuffer_enable_locking(wbuf, NULL);
 
-	port = event_iocp_port_launch();
+	port = event_iocp_port_launch(0);
 	tt_assert(port);
 	tt_assert(rbuf);
 	tt_assert(wbuf);
@@ -231,7 +231,7 @@ test_iocp_bufferevent_async(void *ptr)
 	size_t n;
 	struct timeval one_sec = {1,0};
 
-	event_base_start_iocp(data->base);
+	event_base_start_iocp(data->base, 0);
 	port = event_base_get_iocp(data->base);
 	tt_assert(port);
 
