@@ -74,6 +74,8 @@ struct bufferevent_async {
 	unsigned read_in_progress : 1;
 	unsigned write_in_progress : 1;
 	unsigned ok : 1;
+	unsigned added_rd : 1;
+	unsigned added_wr : 1;
 };
 
 const struct bufferevent_ops bufferevent_ops_async = {
@@ -125,53 +127,59 @@ upcast_write(struct event_overlapped *eo)
 }
 
 static void
-bev_async_consider_writing(struct bufferevent_async *b)
+bev_async_consider_writing(struct bufferevent_async *beva)
 {
 	size_t at_most;
 	int limit;
+	struct bufferevent *bev = &beva->bev.bev;
+
 	/* Don't write if there's a write in progress, or we do not
 	 * want to write. */
-	if (!b->ok || b->write_in_progress || !(b->bev.bev.enabled&EV_WRITE))
+	if (!beva->ok || beva->write_in_progress || !(bev->enabled&EV_WRITE))
 		return;
 	/* Don't write if there's nothing to write */
-	if (!evbuffer_get_length(b->bev.bev.output))
+	if (!evbuffer_get_length(bev->output))
 		return;
 
-	at_most = evbuffer_get_length(b->bev.bev.output);
+	at_most = evbuffer_get_length(bev->output);
 
 	/* XXXX This over-commits. */
-	limit = _bufferevent_get_write_max(&b->bev);
+	limit = _bufferevent_get_write_max(&beva->bev);
 	if (at_most >= limit)
 		at_most = limit;
 
-	if (b->bev.write_suspended)
+	if (beva->bev.write_suspended)
 		return;
 
 	/*  XXXX doesn't respect low-water mark very well. */
-	if (evbuffer_launch_write(b->bev.bev.output, at_most,
-	    &b->write_overlapped)) {
-		b->ok = 0;
-		_bufferevent_run_eventcb(&b->bev.bev, BEV_EVENT_ERROR);
+	bufferevent_incref(bev);
+	if (evbuffer_launch_write(bev->output, at_most,
+	    &beva->write_overlapped)) {
+		bufferevent_decref(bev);
+		beva->ok = 0;
+		_bufferevent_run_eventcb(bev, BEV_EVENT_ERROR);
 	} else {
-		b->write_in_progress = 1;
+		beva->write_in_progress = 1;
 	}
 }
 
 static void
-bev_async_consider_reading(struct bufferevent_async *b)
+bev_async_consider_reading(struct bufferevent_async *beva)
 {
 	size_t cur_size;
 	size_t read_high;
 	size_t at_most;
 	int limit;
+	struct bufferevent *bev = &beva->bev.bev;
+
 	/* Don't read if there is a read in progress, or we do not
 	 * want to read. */
-	if (!b->ok || b->read_in_progress || !(b->bev.bev.enabled&EV_READ))
+	if (!beva->ok || beva->read_in_progress || !(bev->enabled&EV_READ))
 		return;
 
 	/* Don't read if we're full */
-	cur_size = evbuffer_get_length(b->bev.bev.input);
-	read_high = b->bev.bev.wm_read.high;
+	cur_size = evbuffer_get_length(bev->input);
+	read_high = bev->wm_read.high;
 	if (read_high) {
 		if (cur_size >= read_high)
 			return;
@@ -181,19 +189,20 @@ bev_async_consider_reading(struct bufferevent_async *b)
 	}
 
 	/* XXXX This over-commits. */
-	limit = _bufferevent_get_read_max(&b->bev);
+	limit = _bufferevent_get_read_max(&beva->bev);
 	if (at_most >= limit)
 		at_most = limit;
 
-	if (b->bev.read_suspended)
+	if (beva->bev.read_suspended)
 		return;
 
-	if (evbuffer_launch_read(b->bev.bev.input, at_most,
-	    &b->read_overlapped)) {
-		b->ok = 0;
-		_bufferevent_run_eventcb(&b->bev.bev, BEV_EVENT_ERROR);
+	bufferevent_incref(bev);
+	if (evbuffer_launch_read(bev->input, at_most, &beva->read_overlapped)) {
+		beva->ok = 0;
+		bufferevent_decref(bev);
+		_bufferevent_run_eventcb(bev, BEV_EVENT_ERROR);
 	} else {
-		b->read_in_progress = 1;
+		beva->read_in_progress = 1;
 	}
 }
 
@@ -244,10 +253,20 @@ be_async_enable(struct bufferevent *buf, short what)
 		return -1;
 
 	/* NOTE: This interferes with non-blocking connect */
-	if (what & EV_READ)
+	if (what & EV_READ) {
 		BEV_RESET_GENERIC_READ_TIMEOUT(buf);
-	if (what & EV_WRITE)
+		if (!bev_async->added_rd) {
+			bev_async->added_rd = 1;
+			event_base_add_virtual(buf->ev_base);
+		}
+	}
+	if (what & EV_WRITE) {
 		BEV_RESET_GENERIC_WRITE_TIMEOUT(buf);
+		if (!bev_async->added_wr) {
+			bev_async->added_wr = 1;
+			event_base_add_virtual(buf->ev_base);
+		}
+	}
 
 	/* If we newly enable reading or writing, and we aren't reading or
 	   writing already, consider launching a new read or write. */
@@ -262,14 +281,25 @@ be_async_enable(struct bufferevent *buf, short what)
 static int
 be_async_disable(struct bufferevent *bev, short what)
 {
+	struct bufferevent_async *bev_async = upcast(bev);
 	/* XXXX If we disable reading or writing, we may want to consider
 	 * canceling any in-progress read or write operation, though it might
 	 * not work. */
 
-	if (what & EV_READ)
+	if (what & EV_READ) {
 		BEV_DEL_GENERIC_READ_TIMEOUT(bev);
-	if (what & EV_WRITE)
+		if (bev_async->added_rd) {
+			bev_async->added_rd = 0;
+			event_base_del_virtual(bev->ev_base);
+		}
+	}
+	if (what & EV_WRITE) {
 		BEV_DEL_GENERIC_WRITE_TIMEOUT(bev);
+		if (bev_async->added_wr) {
+			bev_async->added_wr = 0;
+			event_base_del_virtual(bev->ev_base);
+		}
+	}
 
 	return 0;
 }
@@ -277,10 +307,17 @@ be_async_disable(struct bufferevent *bev, short what)
 static void
 be_async_destruct(struct bufferevent *bev)
 {
+	struct bufferevent_async *bev_async = upcast(bev);
 	struct bufferevent_private *bev_p = BEV_UPCAST(bev);
 	evutil_socket_t fd;
 
-	EVUTIL_ASSERT(!upcast(bev)->write_in_progress && !upcast(bev)->read_in_progress);
+	EVUTIL_ASSERT(!upcast(bev)->write_in_progress &&
+			!upcast(bev)->read_in_progress);
+
+	if (bev_async->added_rd)
+		event_base_del_virtual(bev->ev_base);
+	if (bev_async->added_wr)
+		event_base_del_virtual(bev->ev_base);
 
 	fd = _evbuffer_overlapped_get_fd(bev->input);
 	if (bev_p->options & BEV_OPT_CLOSE_ON_FREE)
@@ -290,6 +327,18 @@ be_async_destruct(struct bufferevent *bev)
 		event_del(&bev->ev_write);
 		_bufferevent_del_generic_timeout_cbs(bev);
 	}
+}
+
+/* GetQueuedCompletionStatus doesn't reliably yield WSA error codes, so
+ * we use WSAGetOverlappedResult to translate. */
+static void
+bev_async_set_wsa_error(struct bufferevent *bev, struct event_overlapped *eo)
+{
+	DWORD bytes, flags;
+	evutil_socket_t fd;
+
+	fd = _evbuffer_overlapped_get_fd(bev->input);
+	WSAGetOverlappedResult(fd, &eo->overlapped, &bytes, FALSE, &flags);
 }
 
 static int
@@ -306,13 +355,16 @@ connect_complete(struct event_overlapped *eo, ev_uintptr_t key,
 	struct bufferevent_async *bev_a = upcast_connect(eo);
 	struct bufferevent *bev = &bev_a->bev.bev;
 
-	_bufferevent_incref_and_lock(bev);
+	BEV_LOCK(bev);
 
 	EVUTIL_ASSERT(bev_a->bev.connecting);
 	bev_a->bev.connecting = 0;
 
 	if (ok)
 		bufferevent_async_set_connected(bev);
+	else
+		bev_async_set_wsa_error(bev, eo);
+
 	_bufferevent_run_eventcb(bev,
 			ok? BEV_EVENT_CONNECTED : BEV_EVENT_ERROR);
 
@@ -327,11 +379,14 @@ read_complete(struct event_overlapped *eo, ev_uintptr_t key,
 	struct bufferevent *bev = &bev_a->bev.bev;
 	short what = BEV_EVENT_READING;
 
-	_bufferevent_incref_and_lock(bev);
+	BEV_LOCK(bev);
 	EVUTIL_ASSERT(bev_a->read_in_progress);
 
 	evbuffer_commit_read(bev->input, nbytes);
 	bev_a->read_in_progress = 0;
+
+	if (!ok)
+		bev_async_set_wsa_error(bev, eo);
 
 	if (bev_a->ok) {
 		if (ok && nbytes) {
@@ -363,11 +418,13 @@ write_complete(struct event_overlapped *eo, ev_uintptr_t key,
 	struct bufferevent *bev = &bev_a->bev.bev;
 	short what = BEV_EVENT_WRITING;
 
-	_bufferevent_incref_and_lock(bev);
+	BEV_LOCK(bev);
 	EVUTIL_ASSERT(bev_a->write_in_progress);
-
 	evbuffer_commit_write(bev->output, nbytes);
 	bev_a->write_in_progress = 0;
+
+	if (!ok)
+		bev_async_set_wsa_error(bev, eo);
 
 	if (bev_a->ok) {
 		if (ok && nbytes) {
@@ -506,10 +563,13 @@ bufferevent_async_connect(struct bufferevent *bev, evutil_socket_t fd,
 	    WSAGetLastError() != WSAEINVAL)
 		return -1;
 
+	bufferevent_incref(bev);
 	rc = ext->ConnectEx(fd, sa, socklen, NULL, 0, NULL,
 			    &bev_async->connect_overlapped.overlapped);
 	if (rc || WSAGetLastError() == ERROR_IO_PENDING)
 		return 0;
+
+	bufferevent_decref(bev);
 
 	return -1;
 }

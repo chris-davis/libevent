@@ -36,6 +36,7 @@
 #include "log-internal.h"
 #include "mm-internal.h"
 #include "event-internal.h"
+#include "evthread-internal.h"
 
 #define NOTIFICATION_KEY ((ULONG_PTR)-1)
 
@@ -278,3 +279,18 @@ event_base_get_iocp(struct event_base *base)
 #endif
 }
 
+void
+event_base_add_virtual(struct event_base *base)
+{
+	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
+	base->event_count++;
+	EVBASE_RELEASE_LOCK(base, th_base_lock);
+}
+
+void
+event_base_del_virtual(struct event_base *base)
+{
+	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
+	base->event_count--;
+	EVBASE_RELEASE_LOCK(base, th_base_lock);
+}

@@ -194,6 +194,10 @@ int bufferevent_async_can_connect(struct bufferevent *bev);
 int bufferevent_async_connect(struct bufferevent *bev, evutil_socket_t fd,
 	const struct sockaddr *sa, int socklen);
 
+/* FIXME document. */
+void event_base_add_virtual(struct event_base *base);
+void event_base_del_virtual(struct event_base *base);
+
 #ifdef __cplusplus
 }
 #endif
