@@ -600,6 +600,10 @@ evhttp_connection_incoming_fail(struct evhttp_request *req,
 			mm_free(req->uri);
 			req->uri = NULL;
 		}
+		if (req->uri_elems) {
+			evhttp_uri_free(req->uri_elems);
+			req->uri_elems = NULL;
+		}
 
 		/*
 		 * the callback needs to send a reply, once the reply has
@@ -1403,6 +1407,10 @@ evhttp_parse_request_line(struct evhttp_request *req, char *line)
 		return (-1);
 	}
 
+	if ((req->uri_elems = evhttp_uri_parse(req->uri)) == NULL) {
+		return -1;
+	}
+	
 	/* determine if it's a proxy request */
 	if (strlen(req->uri) > 0 && req->uri[0] != '/')
 		req->flags |= EVHTTP_PROXY_REQUEST;
@@ -2634,7 +2642,9 @@ prefix_suffix_match(const char *pattern, const char *name, int ignorecase)
 	while (1) {
 		switch (c = *pattern++) {
 		case '\0':
-			return *name == '\0';
+			/* The Host: header may include a port number. We
+			   ignore that for now. */
+			return *name == '\0' || *name == ':';
 
 		case '*':
 			while (*name != '\0') {
@@ -2672,7 +2682,7 @@ evhttp_handle_request(struct evhttp_request *req, void *arg)
 	}
 
 	/* handle potential virtual hosts */
-	hostname = evhttp_find_header(req->input_headers, "Host");
+	hostname = evhttp_request_get_host(req);
 	if (hostname != NULL) {
 		struct evhttp *vhost;
 		TAILQ_FOREACH(vhost, &http->virtualhosts, next_vhost) {
@@ -3106,6 +3116,8 @@ evhttp_request_free(struct evhttp_request *req)
 		mm_free(req->remote_host);
 	if (req->uri != NULL)
 		mm_free(req->uri);
+	if (req->uri_elems != NULL)
+		evhttp_uri_free(req->uri_elems);
 	if (req->response_code_line != NULL)
 		mm_free(req->response_code_line);
 
@@ -3164,6 +3176,27 @@ evhttp_request_get_uri(const struct evhttp_request *req) {
 	if (req->uri == NULL)
 		event_debug(("%s: request %p has no uri\n", __func__, req));
 	return (req->uri);
+}
+
+const struct evhttp_uri *
+evhttp_request_get_uri_elements(const struct evhttp_request *req) {
+	if (req->uri_elems == NULL)
+		event_debug(("%s: request %p has no uri elems\n",
+			    __func__, req));
+	return (req->uri_elems);
+}
+
+const char *
+evhttp_request_get_host(const struct evhttp_request *req)
+{
+	const char *host = NULL;
+
+	if (req->uri_elems)
+		host = evhttp_uri_get_host(req->uri_elems);
+	if (!host && req->input_headers)
+		host = evhttp_find_header(req->input_headers, "Host");
+
+	return host;
 }
 
 enum evhttp_cmd_type

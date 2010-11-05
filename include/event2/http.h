@@ -469,6 +469,8 @@ void evhttp_cancel_request(struct evhttp_request *req);
 
 /** Returns the request URI */
 const char *evhttp_request_get_uri(const struct evhttp_request *req);
+/** Returns the request URI (parsed) */
+const struct evhttp_uri *evhttp_request_get_uri_elements(const struct evhttp_request *req);
 /** Returns the request command */
 enum evhttp_cmd_type evhttp_request_get_command(const struct evhttp_request *req);
 /** Returns the input headers */
@@ -479,6 +481,11 @@ struct evkeyvalq *evhttp_request_get_output_headers(struct evhttp_request *req);
 struct evbuffer *evhttp_request_get_input_buffer(struct evhttp_request *req);
 /** Returns the output buffer */
 struct evbuffer *evhttp_request_get_output_buffer(struct evhttp_request *req);
+/** Returns the host associated with the request. If a client sends an absolute
+    URI, the host part of that is preferred. Otherwise, the input headers are
+    searched for a Host: header. NULL is returned if no absolute URI or Host:
+    header is provided. */
+const char *evhttp_request_get_host(const struct evhttp_request *req);
 
 /* Interfaces for dealing with HTTP headers */
 

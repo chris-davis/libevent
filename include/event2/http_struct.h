@@ -92,6 +92,7 @@ struct {
 	size_t body_size;
 
 	char *uri;			/* uri after HTTP request was parsed */
+	struct evhttp_uri *uri_elems;	/* uri elements */
 
 	char major;			/* HTTP Major number */
 	char minor;			/* HTTP Minor number */
