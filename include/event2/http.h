@@ -248,6 +248,25 @@ int evhttp_add_virtual_host(struct evhttp* http, const char *pattern,
 int evhttp_remove_virtual_host(struct evhttp* http, struct evhttp* vhost);
 
 /**
+   Add a server alias to an http object. The http object can be a virtual
+   host or the main server. 
+
+   @param http the evhttp object
+   @param alias the alias to add
+   @see evhttp_add_remove_alias() 
+*/
+int evhttp_add_server_alias(struct evhttp *http, const char *alias);
+
+/**
+   Remove a server alias from an http object.
+ 
+   @param http the evhttp object
+   @param alias the alias to remove
+   @see evhttp_add_server_alias() 
+*/
+int evhttp_remove_server_alias(struct evhttp *http, const char *alias);
+
+/**
  * Set the timeout for an HTTP request.
  *
  * @param http an evhttp object
@@ -466,6 +485,10 @@ int evhttp_make_request(struct evhttp_connection *evcon,
 */
 void evhttp_cancel_request(struct evhttp_request *req);
 
+/**
+ * A structure to hold a parsed URI or Relative-Ref conforming to RFC3986.
+ */
+struct evhttp_uri;
 
 /** Returns the request URI */
 const char *evhttp_request_get_uri(const struct evhttp_request *req);
@@ -647,11 +670,6 @@ int evhttp_parse_query_str(const char *uri, struct evkeyvalq *headers);
  * @return an escaped HTML string or NULL on error
  */
 char *evhttp_htmlescape(const char *html);
-
-/**
- * A structure to hold a parsed URI or Relative-Ref conforming to RFC3986.
- */
-struct evhttp_uri;
 
 /**
  * Return a new empty evhttp_uri with no fields set.
