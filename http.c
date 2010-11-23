@@ -2714,8 +2714,6 @@ evhttp_find_vhost(struct evhttp *http, struct evhttp **outhttp,
 	struct evhttp *vhost;
 	struct evhttp *oldhttp;
 	int match_found = 0;
-	char *hostname_noport = NULL;
-	char *p;
 
 	if (evhttp_find_alias(http, outhttp, hostname))
 		return 1;
@@ -3231,7 +3229,9 @@ evhttp_request_free(struct evhttp_request *req)
 		evhttp_uri_free(req->uri_elems);
 	if (req->response_code_line != NULL)
 		mm_free(req->response_code_line);
-
+	if (req->host_cache != NULL)
+		mm_free(req->host_cache);
+		
 	evhttp_clear_headers(req->input_headers);
 	mm_free(req->input_headers);
 
@@ -3298,15 +3298,41 @@ evhttp_request_get_uri_elements(const struct evhttp_request *req) {
 }
 
 const char *
-evhttp_request_get_host(const struct evhttp_request *req)
+evhttp_request_get_host(struct evhttp_request *req)
 {
 	const char *host = NULL;
 
+	if (req->host_cache)
+		return req->host_cache;
+
 	if (req->uri_elems)
 		host = evhttp_uri_get_host(req->uri_elems);
-	if (!host && req->input_headers)
+	if (!host && req->input_headers) {
+		const char *p;
+		size_t len;
+	
 		host = evhttp_find_header(req->input_headers, "Host");
-
+		/* The Host: header may include a port. Remove it here
+                   to be consistent with uri_elems case above. */
+		if (host) {
+			p = host + strlen(host) - 1;
+			while (p > host && EVUTIL_ISDIGIT(*p))
+				--p;
+			if (p > host && *p == ':') {
+				len = p - host;
+				req->host_cache = mm_malloc(len + 1);
+				if (!req->host_cache) {
+					event_warn("%s: malloc", __func__);
+					return NULL;
+				}
+				memcpy(req->host_cache, host, len);
+				req->host_cache[len] = '\0';
+				host = req->host_cache;
+			}
+		}
+		
+	}
+	
 	return host;
 }
 

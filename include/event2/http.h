@@ -508,7 +508,7 @@ struct evbuffer *evhttp_request_get_output_buffer(struct evhttp_request *req);
     URI, the host part of that is preferred. Otherwise, the input headers are
     searched for a Host: header. NULL is returned if no absolute URI or Host:
     header is provided. */
-const char *evhttp_request_get_host(const struct evhttp_request *req);
+const char *evhttp_request_get_host(struct evhttp_request *req);
 
 /* Interfaces for dealing with HTTP headers */
 

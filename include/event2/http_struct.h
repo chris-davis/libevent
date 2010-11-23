@@ -85,6 +85,9 @@ struct {
 	char *remote_host;
 	ev_uint16_t remote_port;
 
+	/* cache of the hostname for evhttp_request_get_host */
+	char *host_cache;
+
 	enum evhttp_request_kind kind;
 	enum evhttp_cmd_type type;
 
