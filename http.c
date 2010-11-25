@@ -3330,7 +3330,6 @@ evhttp_request_get_host(struct evhttp_request *req)
 				host = req->host_cache;
 			}
 		}
-		
 	}
 	
 	return host;
